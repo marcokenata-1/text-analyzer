@@ -1,0 +1,49 @@
+# Deploy overlay — Ollama fully containerized, for hosts other than this Mac
+# (a Linux VPS, or a machine with an NVIDIA GPU + nvidia-container-toolkit).
+# CPU-only by default; uncomment the `deploy:` block under `ollama` on a host
+# with an NVIDIA GPU to pass it through.
+#
+# Usage: docker compose -f docker-compose.yml -f docker-compose.deploy.yml up -d
+#
+# First run on a fresh host also needs the model pulled once:
+#   docker exec local_ollama ollama pull llama3.1
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: local_ollama
+    restart: always
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    # Requires nvidia-container-toolkit installed on the host:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  api:
+    build:
+      context: ./scripts
+      dockerfile: Dockerfile.api
+    container_name: local_api
+    restart: always
+    environment:
+      GRAPHDB_URL: http://graphdb:7200
+      GRAPHDB_REPOSITORY: ifrs-gics
+      CHROMA_HOST: chromadb
+      CHROMA_PORT: 8000
+      OLLAMA_HOST: http://ollama:11434
+    ports:
+      - "8002:8000" # /classify, /classify-extraction, /reason, /validate (http://localhost:8002/docs)
+    depends_on:
+      - graphdb
+      - chromadb
+      - ollama
+
+volumes:
+  ollama_data:

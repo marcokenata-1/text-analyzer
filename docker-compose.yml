@@ -1,0 +1,62 @@
+# Base stack — services shared by both environments (no Ollama/api here,
+# those differ per environment). Always combined with one overlay:
+#
+#   Local (Mac, native Ollama for Metal GPU acceleration):
+#     docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+#
+#   Deploy (Linux host, Ollama containerized, optional NVIDIA passthrough):
+#     docker compose -f docker-compose.yml -f docker-compose.deploy.yml up -d
+
+version: '3.8'
+
+services:
+  # db:
+  #   image: postgres:15-alpine
+  #   container_name: local_postgres
+  #   restart: always
+  #   environment:
+  #     POSTGRES_USER: postgres
+  #     POSTGRES_PASSWORD: password123
+  #     POSTGRES_DB: postgres
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+
+  graphdb:
+    image: ontotext/graphdb:10.7.0
+    container_name: local_graphdb
+    restart: always
+    environment:
+      GDB_HEAP_SIZE: 2g
+    ports:
+      - "7200:7200" # Workbench UI + SPARQL endpoint (http://localhost:7200)
+    volumes:
+      - graphdb_data:/opt/graphdb/home
+
+  chromadb:
+    image: chromadb/chroma:1.5.9
+    container_name: local_chromadb
+    restart: always
+    ports:
+      - "8001:8000" # HTTP API (http://localhost:8001) — 8000 is taken by the FastAPI app
+    volumes:
+      - ./data/chromadb:/data # reuse the existing local persistent store
+
+  knowledge-api:
+    build:
+      context: ./scripts
+      dockerfile: Dockerfile.knowledge-api
+    container_name: local_knowledge_api
+    restart: always
+    environment:
+      GRAPHDB_URL: http://graphdb:7200 # internal compose network — not the host-mapped 7200
+      GRAPHDB_REPOSITORY: ifrs-gics
+    ports:
+      - "8000:8000" # POST /classify (http://localhost:8000/docs) — UC2 only, no ChromaDB/Ollama dependency
+    depends_on:
+      - graphdb
+
+volumes:
+  postgres_data:
+  graphdb_data:

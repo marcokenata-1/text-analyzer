@@ -1,0 +1,29 @@
+# Local dev overlay — Ollama runs natively on the host (Mac app / `ollama serve`),
+# not in Docker. Docker Desktop on Mac has no GPU passthrough mechanism, so this
+# is the only way to get Metal-accelerated inference; the alternative is a
+# containerized Ollama running CPU-only (see docker-compose.deploy.yml).
+#
+# Prerequisite: Ollama running natively on the host with llama3.1 pulled
+#   (`ollama pull llama3.1`) — already the case if you installed the Mac app.
+#
+# Usage: docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+
+services:
+  api:
+    build:
+      context: ./scripts
+      dockerfile: Dockerfile.api
+    container_name: local_api
+    restart: always
+    environment:
+      GRAPHDB_URL: http://graphdb:7200
+      GRAPHDB_REPOSITORY: ifrs-gics
+      CHROMA_HOST: chromadb
+      CHROMA_PORT: 8000
+      # host.docker.internal resolves to the Mac host from inside the container
+      OLLAMA_HOST: http://host.docker.internal:11434
+    ports:
+      - "8002:8000" # /classify, /classify-extraction, /reason, /validate (http://localhost:8002/docs)
+    depends_on:
+      - graphdb
+      - chromadb
