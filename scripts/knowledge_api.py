@@ -34,7 +34,7 @@ GRAPHDB_URL  = os.environ.get("GRAPHDB_URL", "http://localhost:7200")
 REPOSITORY   = os.environ.get("GRAPHDB_REPOSITORY", "ifrs-gics")
 SPARQL_URL   = f"{GRAPHDB_URL}/repositories/{REPOSITORY}"
 
-MODEL_NAME   = "all-MiniLM-L6-v2"
+MODEL_NAME   = "BAAI/bge-base-en-v1.5"
 
 GICS_LEVELS  = [2, 4, 6, 8]
 LEVEL_NAMES  = {2: "Sector", 4: "IndustryGroup", 6: "Industry", 8: "SubIndustry"}

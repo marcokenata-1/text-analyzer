@@ -24,6 +24,7 @@ Setup:
     Repository 'ifrs-gics' is auto-created if missing
 """
 
+import glob
 import json
 import re
 import requests
@@ -83,335 +84,48 @@ IFRS = Namespace("http://xbrl.ifrs.org/taxonomy/2025/")
 KG   = Namespace("http://ifrs-gics.ontotext.com/ontology/")
 
 
-HAS_CHILD_TAG_RULES = [
-    # (parent, child, weight) — weight +1.0 for addition, -1.0 for subtraction.
-    # Sourced from the IFRS Accounting Taxonomy 2025-03-27 calculation linkbases
-    # (cal_ias_1_*.xml, cal_ias_7_*.xml — Statement of Financial Position, Profit or
-    # Loss, Comprehensive Income, Changes in Equity, Cash Flows), not hand-typed.
-    ("AdjustmentsForReconcileProfitLoss", "AdjustmentsForDecreaseIncreaseInInventories", 1.0),
-    ("AdjustmentsForReconcileProfitLoss", "AdjustmentsForDecreaseIncreaseInOtherOperatingReceivables", 1.0),
-    ("AdjustmentsForReconcileProfitLoss", "AdjustmentsForDecreaseIncreaseInTradeAccountReceivable", 1.0),
-    ("AdjustmentsForReconcileProfitLoss", "AdjustmentsForDepreciationAndAmortisationExpense", 1.0),
-    ("AdjustmentsForReconcileProfitLoss", "AdjustmentsForFairValueGainsLosses", 1.0),
-    ("AdjustmentsForReconcileProfitLoss", "AdjustmentsForFinanceCosts", 1.0),
-    ("AdjustmentsForReconcileProfitLoss", "AdjustmentsForImpairmentLossReversalOfImpairmentLossRecognisedInProfitOrLoss", 1.0),
-    ("AdjustmentsForReconcileProfitLoss", "AdjustmentsForIncomeTaxExpense", 1.0),
-    ("AdjustmentsForReconcileProfitLoss", "AdjustmentsForIncreaseDecreaseInOtherOperatingPayables", 1.0),
-    ("AdjustmentsForReconcileProfitLoss", "AdjustmentsForIncreaseDecreaseInTradeAccountPayable", 1.0),
-    ("AdjustmentsForReconcileProfitLoss", "AdjustmentsForLossesGainsOnDisposalOfNoncurrentAssets", 1.0),
-    ("AdjustmentsForReconcileProfitLoss", "AdjustmentsForProvisions", 1.0),
-    ("AdjustmentsForReconcileProfitLoss", "AdjustmentsForSharebasedPayments", 1.0),
-    ("AdjustmentsForReconcileProfitLoss", "AdjustmentsForUnrealisedForeignExchangeLossesGains", 1.0),
-    ("AdjustmentsForReconcileProfitLoss", "OtherAdjustmentsForNoncashItems", 1.0),
-    ("AdjustmentsForReconcileProfitLoss", "OtherAdjustmentsForWhichCashEffectsAreInvestingOrFinancingCashFlow", 1.0),
-    ("AdjustmentsForReconcileProfitLoss", "OtherAdjustmentsToReconcileProfitLoss", 1.0),
-    ("AdjustmentsForReconcileProfitLoss", "AdjustmentsForUndistributedProfitsOfAssociates", -1.0),
-    ("Assets", "BiologicalAssets", 1.0),
-    ("Assets", "CashAndCashEquivalents", 1.0),
-    ("Assets", "CurrentAssets", 1.0),
-    ("Assets", "CurrentTaxAssets", 1.0),
-    ("Assets", "DeferredTaxAssets", 1.0),
-    ("Assets", "Goodwill", 1.0),
-    ("Assets", "InsuranceContractsIssuedThatAreAssets", 1.0),
-    ("Assets", "IntangibleAssetsOtherThanGoodwill", 1.0),
-    ("Assets", "InventoriesTotal", 1.0),
-    ("Assets", "InvestmentAccountedForUsingEquityMethod", 1.0),
-    ("Assets", "InvestmentProperty", 1.0),
-    ("Assets", "InvestmentsInSubsidiariesJointVenturesAndAssociates", 1.0),
-    ("Assets", "NoncashAssetsPledgedAsCollateralForWhichTransfereeHasRightByContractOrCustomToSellOrRepledgeCollateral", 1.0),
-    ("Assets", "NoncurrentAssets", 1.0),
-    ("Assets", "NoncurrentAssetsOrDisposalGroupsClassifiedAsHeldForSaleOrAsHeldForDistributionToOwners", 1.0),
-    ("Assets", "OtherFinancialAssets", 1.0),
-    ("Assets", "OtherNonfinancialAssets", 1.0),
-    ("Assets", "PropertyPlantAndEquipment", 1.0),
-    ("Assets", "ReinsuranceContractsHeldThatAreAssets", 1.0),
-    ("Assets", "TradeAndOtherReceivables", 1.0),
-    ("CashFlowsFromUsedInFinancingActivities", "OtherInflowsOutflowsOfCashClassifiedAsFinancingActivities", 1.0),
-    ("CashFlowsFromUsedInFinancingActivities", "ProceedsFromBorrowingsClassifiedAsFinancingActivities", 1.0),
-    ("CashFlowsFromUsedInFinancingActivities", "ProceedsFromChangesInOwnershipInterestsInSubsidiaries", 1.0),
-    ("CashFlowsFromUsedInFinancingActivities", "ProceedsFromGovernmentGrantsClassifiedAsFinancingActivities", 1.0),
-    ("CashFlowsFromUsedInFinancingActivities", "ProceedsFromIssuingOtherEquityInstruments", 1.0),
-    ("CashFlowsFromUsedInFinancingActivities", "ProceedsFromIssuingShares", 1.0),
-    ("CashFlowsFromUsedInFinancingActivities", "DividendsPaidClassifiedAsFinancingActivities", -1.0),
-    ("CashFlowsFromUsedInFinancingActivities", "IncomeTaxesPaidRefundClassifiedAsFinancingActivities", -1.0),
-    ("CashFlowsFromUsedInFinancingActivities", "InterestPaidClassifiedAsFinancingActivities", -1.0),
-    ("CashFlowsFromUsedInFinancingActivities", "PaymentsFromChangesInOwnershipInterestsInSubsidiaries", -1.0),
-    ("CashFlowsFromUsedInFinancingActivities", "PaymentsOfLeaseLiabilitiesClassifiedAsFinancingActivities", -1.0),
-    ("CashFlowsFromUsedInFinancingActivities", "PaymentsOfOtherEquityInstruments", -1.0),
-    ("CashFlowsFromUsedInFinancingActivities", "PaymentsToAcquireOrRedeemEntitysShares", -1.0),
-    ("CashFlowsFromUsedInFinancingActivities", "RepaymentsOfBorrowingsClassifiedAsFinancingActivities", -1.0),
-    ("CashFlowsFromUsedInInvestingActivities", "CashFlowsFromLosingControlOfSubsidiariesOrOtherBusinessesClassifiedAsInvestingActivities", 1.0),
-    ("CashFlowsFromUsedInInvestingActivities", "CashReceiptsFromFutureContractsForwardContractsOptionContractsAndSwapContractsClassifiedAsInvestingActivities", 1.0),
-    ("CashFlowsFromUsedInInvestingActivities", "CashReceiptsFromRepaymentOfAdvancesAndLoansMadeToOtherPartiesClassifiedAsInvestingActivities", 1.0),
-    ("CashFlowsFromUsedInInvestingActivities", "DividendsReceivedClassifiedAsInvestingActivities", 1.0),
-    ("CashFlowsFromUsedInInvestingActivities", "InterestReceivedClassifiedAsInvestingActivities", 1.0),
-    ("CashFlowsFromUsedInInvestingActivities", "OtherCashReceiptsFromSalesOfEquityOrDebtInstrumentsOfOtherEntitiesClassifiedAsInvestingActivities", 1.0),
-    ("CashFlowsFromUsedInInvestingActivities", "OtherCashReceiptsFromSalesOfInterestsInJointVenturesClassifiedAsInvestingActivities", 1.0),
-    ("CashFlowsFromUsedInInvestingActivities", "OtherInflowsOutflowsOfCashClassifiedAsInvestingActivities", 1.0),
-    ("CashFlowsFromUsedInInvestingActivities", "ProceedsFromGovernmentGrantsClassifiedAsInvestingActivities", 1.0),
-    ("CashFlowsFromUsedInInvestingActivities", "ProceedsFromOtherLongtermAssetsClassifiedAsInvestingActivities", 1.0),
-    ("CashFlowsFromUsedInInvestingActivities", "ProceedsFromSalesOfIntangibleAssetsClassifiedAsInvestingActivities", 1.0),
-    ("CashFlowsFromUsedInInvestingActivities", "ProceedsFromSalesOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities", 1.0),
-    ("CashFlowsFromUsedInInvestingActivities", "CashAdvancesAndLoansMadeToOtherPartiesClassifiedAsInvestingActivities", -1.0),
-    ("CashFlowsFromUsedInInvestingActivities", "CashFlowsUsedInObtainingControlOfSubsidiariesOrOtherBusinessesClassifiedAsInvestingActivities", -1.0),
-    ("CashFlowsFromUsedInInvestingActivities", "CashPaymentsForFutureContractsForwardContractsOptionContractsAndSwapContractsClassifiedAsInvestingActivities", -1.0),
-    ("CashFlowsFromUsedInInvestingActivities", "IncomeTaxesPaidRefundClassifiedAsInvestingActivities", -1.0),
-    ("CashFlowsFromUsedInInvestingActivities", "InterestPaidClassifiedAsInvestingActivities", -1.0),
-    ("CashFlowsFromUsedInInvestingActivities", "OtherCashPaymentsToAcquireEquityOrDebtInstrumentsOfOtherEntitiesClassifiedAsInvestingActivities", -1.0),
-    ("CashFlowsFromUsedInInvestingActivities", "OtherCashPaymentsToAcquireInterestsInJointVenturesClassifiedAsInvestingActivities", -1.0),
-    ("CashFlowsFromUsedInInvestingActivities", "PurchaseOfIntangibleAssetsClassifiedAsInvestingActivities", -1.0),
-    ("CashFlowsFromUsedInInvestingActivities", "PurchaseOfOtherLongtermAssetsClassifiedAsInvestingActivities", -1.0),
-    ("CashFlowsFromUsedInInvestingActivities", "PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities", -1.0),
-    ("CashFlowsFromUsedInOperatingActivities", "CashFlowsFromUsedInOperations", 1.0),
-    ("CashFlowsFromUsedInOperatingActivities", "DividendsReceivedClassifiedAsOperatingActivities", 1.0),
-    ("CashFlowsFromUsedInOperatingActivities", "InterestReceivedClassifiedAsOperatingActivities", 1.0),
-    ("CashFlowsFromUsedInOperatingActivities", "OtherInflowsOutflowsOfCashClassifiedAsOperatingActivities", 1.0),
-    ("CashFlowsFromUsedInOperatingActivities", "DividendsPaidClassifiedAsOperatingActivities", -1.0),
-    ("CashFlowsFromUsedInOperatingActivities", "IncomeTaxesPaidRefundClassifiedAsOperatingActivities", -1.0),
-    ("CashFlowsFromUsedInOperatingActivities", "InterestPaidClassifiedAsOperatingActivities", -1.0),
-    ("CashFlowsFromUsedInOperations", "AdjustmentsForReconcileProfitLoss", 1.0),
-    ("CashFlowsFromUsedInOperations", "OtherCashReceiptsFromOperatingActivities", 1.0),
-    ("CashFlowsFromUsedInOperations", "ProfitLoss", 1.0),
-    ("CashFlowsFromUsedInOperations", "ReceiptsFromContractsHeldForDealingOrTradingPurpose", 1.0),
-    ("CashFlowsFromUsedInOperations", "ReceiptsFromRentsAndSubsequentSalesOfSuchAssets", 1.0),
-    ("CashFlowsFromUsedInOperations", "ReceiptsFromRoyaltiesFeesCommissionsAndOtherRevenue", 1.0),
-    ("CashFlowsFromUsedInOperations", "ReceiptsFromSalesOfGoodsAndRenderingOfServices", 1.0),
-    ("CashFlowsFromUsedInOperations", "RecoveriesOnLoansPreviouslyWrittenOff", 1.0),
-    ("CashFlowsFromUsedInOperations", "OtherCashPaymentsFromOperatingActivities", -1.0),
-    ("CashFlowsFromUsedInOperations", "PaymentsFromContractsHeldForDealingOrTradingPurpose", -1.0),
-    ("CashFlowsFromUsedInOperations", "PaymentsRelatingToRoyaltiesFeesAndCommissions", -1.0),
-    ("CashFlowsFromUsedInOperations", "PaymentsToAndOnBehalfOfEmployees", -1.0),
-    ("CashFlowsFromUsedInOperations", "PaymentsToManufactureOrAcquireAssetsHeldForRentalToOthersAndSubsequentlyHeldForSale", -1.0),
-    ("CashFlowsFromUsedInOperations", "PaymentsToSuppliersForGoodsAndServices", -1.0),
-    ("ChangesInEquity", "ComprehensiveIncome", 1.0),
-    ("ChangesInEquity", "IncreaseDecreaseThroughChangesInOwnershipInterestsInSubsidiariesThatDoNotResultInLossOfControl", 1.0),
-    ("ChangesInEquity", "IncreaseDecreaseThroughOtherContributionsByOwners", 1.0),
-    ("ChangesInEquity", "IncreaseDecreaseThroughSharebasedPaymentTransactions", 1.0),
-    ("ChangesInEquity", "IncreaseDecreaseThroughTransfersAndOtherChangesEquity", 1.0),
-    ("ChangesInEquity", "IncreaseDecreaseThroughTreasuryShareTransactions", 1.0),
-    ("ChangesInEquity", "IssueOfEquity", 1.0),
-    ("ChangesInEquity", "AmountRemovedFromReserveOfCashFlowHedgesAndIncludedInInitialCostOrOtherCarryingAmountOfNonfinancialAssetLiabilityOrFirmCommitmentForWhichFairValueHedgeAccountingIsApplied", -1.0),
-    ("ChangesInEquity", "AmountRemovedFromReserveOfChangeInValueOfForeignCurrencyBasisSpreadsAndIncludedInInitialCostOrOtherCarryingAmountOfNonfinancialAssetLiabilityOrFirmCommitmentForWhichFairValueHedgeAccountingIsApplied", -1.0),
-    ("ChangesInEquity", "AmountRemovedFromReserveOfChangeInValueOfForwardElementsOfForwardContractsAndIncludedInInitialCostOrOtherCarryingAmountOfNonfinancialAssetLiabilityOrFirmCommitmentForWhichFairValueHedgeAccountingIsApplied", -1.0),
-    ("ChangesInEquity", "AmountRemovedFromReserveOfChangeInValueOfTimeValueOfOptionsAndIncludedInInitialCostOrOtherCarryingAmountOfNonfinancialAssetLiabilityOrFirmCommitmentForWhichFairValueHedgeAccountingIsApplied", -1.0),
-    ("ChangesInEquity", "DividendsPaid", -1.0),
-    ("ChangesInEquity", "IncreaseDecreaseThroughOtherDistributionsToOwners", -1.0),
-    ("ComprehensiveIncome", "OtherComprehensiveIncome", 1.0),
-    ("ComprehensiveIncome", "ProfitLoss", 1.0),
-    ("CurrentAssets", "CurrentAssetsOtherThanAssetsOrDisposalGroupsClassifiedAsHeldForSaleOrAsHeldForDistributionToOwners", 1.0),
-    ("CurrentAssets", "NoncurrentAssetsOrDisposalGroupsClassifiedAsHeldForSaleOrAsHeldForDistributionToOwners", 1.0),
-    ("CurrentAssetsOtherThanAssetsOrDisposalGroupsClassifiedAsHeldForSaleOrAsHeldForDistributionToOwners", "CashAndCashEquivalents", 1.0),
-    ("CurrentAssetsOtherThanAssetsOrDisposalGroupsClassifiedAsHeldForSaleOrAsHeldForDistributionToOwners", "CurrentBiologicalAssets", 1.0),
-    ("CurrentAssetsOtherThanAssetsOrDisposalGroupsClassifiedAsHeldForSaleOrAsHeldForDistributionToOwners", "CurrentNoncashAssetsPledgedAsCollateralForWhichTransfereeHasRightByContractOrCustomToSellOrRepledgeCollateral", 1.0),
-    ("CurrentAssetsOtherThanAssetsOrDisposalGroupsClassifiedAsHeldForSaleOrAsHeldForDistributionToOwners", "CurrentTaxAssetsCurrent", 1.0),
-    ("CurrentAssetsOtherThanAssetsOrDisposalGroupsClassifiedAsHeldForSaleOrAsHeldForDistributionToOwners", "Inventories", 1.0),
-    ("CurrentAssetsOtherThanAssetsOrDisposalGroupsClassifiedAsHeldForSaleOrAsHeldForDistributionToOwners", "OtherCurrentFinancialAssets", 1.0),
-    ("CurrentAssetsOtherThanAssetsOrDisposalGroupsClassifiedAsHeldForSaleOrAsHeldForDistributionToOwners", "OtherCurrentNonfinancialAssets", 1.0),
-    ("CurrentAssetsOtherThanAssetsOrDisposalGroupsClassifiedAsHeldForSaleOrAsHeldForDistributionToOwners", "TradeAndOtherCurrentReceivables", 1.0),
-    ("CurrentLiabilities", "CurrentLiabilitiesOtherThanLiabilitiesIncludedInDisposalGroupsClassifiedAsHeldForSale", 1.0),
-    ("CurrentLiabilities", "LiabilitiesIncludedInDisposalGroupsClassifiedAsHeldForSale", 1.0),
-    ("CurrentLiabilitiesOtherThanLiabilitiesIncludedInDisposalGroupsClassifiedAsHeldForSale", "CurrentProvisions", 1.0),
-    ("CurrentLiabilitiesOtherThanLiabilitiesIncludedInDisposalGroupsClassifiedAsHeldForSale", "CurrentTaxLiabilitiesCurrent", 1.0),
-    ("CurrentLiabilitiesOtherThanLiabilitiesIncludedInDisposalGroupsClassifiedAsHeldForSale", "OtherCurrentFinancialLiabilities", 1.0),
-    ("CurrentLiabilitiesOtherThanLiabilitiesIncludedInDisposalGroupsClassifiedAsHeldForSale", "OtherCurrentNonfinancialLiabilities", 1.0),
-    ("CurrentLiabilitiesOtherThanLiabilitiesIncludedInDisposalGroupsClassifiedAsHeldForSale", "TradeAndOtherCurrentPayables", 1.0),
-    ("CurrentProvisions", "CurrentProvisionsForEmployeeBenefits", 1.0),
-    ("CurrentProvisions", "OtherShorttermProvisions", 1.0),
-    ("Equity", "EquityAttributableToOwnersOfParent", 1.0),
-    ("Equity", "NoncontrollingInterests", 1.0),
-    ("EquityAndLiabilities", "Equity", 1.0),
-    ("EquityAndLiabilities", "Liabilities", 1.0),
-    ("EquityAttributableToOwnersOfParent", "IssuedCapital", 1.0),
-    ("EquityAttributableToOwnersOfParent", "OtherEquityInterest", 1.0),
-    ("EquityAttributableToOwnersOfParent", "OtherReserves", 1.0),
-    ("EquityAttributableToOwnersOfParent", "RetainedEarnings", 1.0),
-    ("EquityAttributableToOwnersOfParent", "SharePremium", 1.0),
-    ("EquityAttributableToOwnersOfParent", "TreasuryShares", -1.0),
-    ("GrossProfit", "Revenue", 1.0),
-    ("GrossProfit", "CostOfSales", -1.0),
-    ("IncomeTaxRelatingToComponentsOfOtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLoss", "IncomeTaxRelatingToAvailableforsaleFinancialAssetsOfOtherComprehensiveIncome", 1.0),
-    ("IncomeTaxRelatingToComponentsOfOtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLoss", "IncomeTaxRelatingToCashFlowHedgesOfOtherComprehensiveIncome", 1.0),
-    ("IncomeTaxRelatingToComponentsOfOtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLoss", "IncomeTaxRelatingToChangeInValueOfForeignCurrencyBasisSpreadsOfOtherComprehensiveIncome", 1.0),
-    ("IncomeTaxRelatingToComponentsOfOtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLoss", "IncomeTaxRelatingToChangeInValueOfForwardElementsOfForwardContractsOfOtherComprehensiveIncome", 1.0),
-    ("IncomeTaxRelatingToComponentsOfOtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLoss", "IncomeTaxRelatingToChangeInValueOfTimeValueOfOptionsOfOtherComprehensiveIncome", 1.0),
-    ("IncomeTaxRelatingToComponentsOfOtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLoss", "IncomeTaxRelatingToExchangeDifferencesOnTranslationOfOtherComprehensiveIncome", 1.0),
-    ("IncomeTaxRelatingToComponentsOfOtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLoss", "IncomeTaxRelatingToFinanceIncomeExpensesFromReinsuranceContractsHeldOfOtherComprehensiveIncome", 1.0),
-    ("IncomeTaxRelatingToComponentsOfOtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLoss", "IncomeTaxRelatingToFinancialAssetsMeasuredAtFairValueThroughOtherComprehensiveIncome", 1.0),
-    ("IncomeTaxRelatingToComponentsOfOtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLoss", "IncomeTaxRelatingToHedgesOfNetInvestmentsInForeignOperationsOfOtherComprehensiveIncome", 1.0),
-    ("IncomeTaxRelatingToComponentsOfOtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLoss", "IncomeTaxRelatingToInsuranceFinanceIncomeExpensesFromInsuranceContractsIssuedOfOtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLoss", 1.0),
-    ("IncomeTaxRelatingToComponentsOfOtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLoss", "IncomeTaxRelatingToInsuranceFinanceIncomeExpensesFromInsuranceContractsIssuedOfOtherComprehensiveIncomeThatWillNotBeReclassifiedToProfitOrLoss", 1.0),
-    ("IncomeTaxRelatingToComponentsOfOtherComprehensiveIncomeThatWillNotBeReclassifiedToProfitOrLoss", "IncomeTaxRelatingToChangesInFairValueOfFinancialLiabilityAttributableToChangeInCreditRiskOfLiabilityOfOtherComprehensiveIncome", 1.0),
-    ("IncomeTaxRelatingToComponentsOfOtherComprehensiveIncomeThatWillNotBeReclassifiedToProfitOrLoss", "IncomeTaxRelatingToChangesInRevaluationSurplusOfOtherComprehensiveIncome", 1.0),
-    ("IncomeTaxRelatingToComponentsOfOtherComprehensiveIncomeThatWillNotBeReclassifiedToProfitOrLoss", "IncomeTaxRelatingToExchangeDifferencesOnTranslationOtherThanTranslationOfForeignOperationsIncludedInOtherComprehensiveIncome", 1.0),
-    ("IncomeTaxRelatingToComponentsOfOtherComprehensiveIncomeThatWillNotBeReclassifiedToProfitOrLoss", "IncomeTaxRelatingToHedgesOfInvestmentsInEquityInstrumentsOfOtherComprehensiveIncome", 1.0),
-    ("IncomeTaxRelatingToComponentsOfOtherComprehensiveIncomeThatWillNotBeReclassifiedToProfitOrLoss", "IncomeTaxRelatingToInvestmentsInEquityInstrumentsOfOtherComprehensiveIncome", 1.0),
-    ("IncomeTaxRelatingToComponentsOfOtherComprehensiveIncomeThatWillNotBeReclassifiedToProfitOrLoss", "IncomeTaxRelatingToRemeasurementsOfDefinedBenefitPlansOfOtherComprehensiveIncome", 1.0),
-    ("IncreaseDecreaseInCashAndCashEquivalents", "EffectOfExchangeRateChangesOnCashAndCashEquivalents", 1.0),
-    ("IncreaseDecreaseInCashAndCashEquivalents", "IncreaseDecreaseInCashAndCashEquivalentsBeforeEffectOfExchangeRateChanges", 1.0),
-    ("IncreaseDecreaseInCashAndCashEquivalentsBeforeEffectOfExchangeRateChanges", "CashFlowsFromUsedInFinancingActivities", 1.0),
-    ("IncreaseDecreaseInCashAndCashEquivalentsBeforeEffectOfExchangeRateChanges", "CashFlowsFromUsedInInvestingActivities", 1.0),
-    ("IncreaseDecreaseInCashAndCashEquivalentsBeforeEffectOfExchangeRateChanges", "CashFlowsFromUsedInOperatingActivities", 1.0),
-    ("Liabilities", "CurrentLiabilities", 1.0),
-    ("Liabilities", "CurrentTaxLiabilities", 1.0),
-    ("Liabilities", "DeferredTaxLiabilities", 1.0),
-    ("Liabilities", "InsuranceContractsIssuedThatAreLiabilities", 1.0),
-    ("Liabilities", "LiabilitiesIncludedInDisposalGroupsClassifiedAsHeldForSale", 1.0),
-    ("Liabilities", "NoncurrentLiabilities", 1.0),
-    ("Liabilities", "OtherFinancialLiabilities", 1.0),
-    ("Liabilities", "OtherNonfinancialLiabilities", 1.0),
-    ("Liabilities", "Provisions", 1.0),
-    ("Liabilities", "ReinsuranceContractsHeldThatAreLiabilities", 1.0),
-    ("Liabilities", "TradeAndOtherPayables", 1.0),
-    ("NoncurrentAssets", "CurrentTaxAssetsNoncurrent", 1.0),
-    ("NoncurrentAssets", "DeferredTaxAssets", 1.0),
-    ("NoncurrentAssets", "Goodwill", 1.0),
-    ("NoncurrentAssets", "IntangibleAssetsOtherThanGoodwill", 1.0),
-    ("NoncurrentAssets", "InvestmentAccountedForUsingEquityMethod", 1.0),
-    ("NoncurrentAssets", "InvestmentProperty", 1.0),
-    ("NoncurrentAssets", "InvestmentsInSubsidiariesJointVenturesAndAssociates", 1.0),
-    ("NoncurrentAssets", "NoncurrentBiologicalAssets", 1.0),
-    ("NoncurrentAssets", "NoncurrentInventories", 1.0),
-    ("NoncurrentAssets", "NoncurrentNoncashAssetsPledgedAsCollateralForWhichTransfereeHasRightByContractOrCustomToSellOrRepledgeCollateral", 1.0),
-    ("NoncurrentAssets", "NoncurrentReceivables", 1.0),
-    ("NoncurrentAssets", "OtherNoncurrentFinancialAssets", 1.0),
-    ("NoncurrentAssets", "OtherNoncurrentNonfinancialAssets", 1.0),
-    ("NoncurrentAssets", "PropertyPlantAndEquipment", 1.0),
-    ("NoncurrentLiabilities", "CurrentTaxLiabilitiesNoncurrent", 1.0),
-    ("NoncurrentLiabilities", "DeferredTaxLiabilities", 1.0),
-    ("NoncurrentLiabilities", "NoncurrentPayables", 1.0),
-    ("NoncurrentLiabilities", "NoncurrentProvisions", 1.0),
-    ("NoncurrentLiabilities", "OtherNoncurrentFinancialLiabilities", 1.0),
-    ("NoncurrentLiabilities", "OtherNoncurrentNonfinancialLiabilities", 1.0),
-    ("NoncurrentProvisions", "NoncurrentProvisionsForEmployeeBenefits", 1.0),
-    ("NoncurrentProvisions", "OtherLongtermProvisions", 1.0),
-    ("OtherComprehensiveIncome", "OtherComprehensiveIncomeBeforeTax", 1.0),
-    ("OtherComprehensiveIncome", "OtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLossNetOfTax", 1.0),
-    ("OtherComprehensiveIncome", "OtherComprehensiveIncomeThatWillNotBeReclassifiedToProfitOrLossNetOfTax", 1.0),
-    ("OtherComprehensiveIncome", "IncomeTaxRelatingToComponentsOfOtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLoss", -1.0),
-    ("OtherComprehensiveIncome", "IncomeTaxRelatingToComponentsOfOtherComprehensiveIncomeThatWillNotBeReclassifiedToProfitOrLoss", -1.0),
-    ("OtherComprehensiveIncome", "IncomeTaxRelatingToShareOfOtherComprehensiveIncomeOfAssociatesAndJointVenturesAccountedForUsingEquityMethodThatWillBeReclassifiedToProfitOrLoss", -1.0),
-    ("OtherComprehensiveIncome", "IncomeTaxRelatingToShareOfOtherComprehensiveIncomeOfAssociatesAndJointVenturesAccountedForUsingEquityMethodThatWillNotBeReclassifiedToProfitOrLoss", -1.0),
-    ("OtherComprehensiveIncomeBeforeTax", "OtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLossBeforeTax", 1.0),
-    ("OtherComprehensiveIncomeBeforeTax", "OtherComprehensiveIncomeThatWillNotBeReclassifiedToProfitOrLossBeforeTax", 1.0),
-    ("OtherComprehensiveIncomeBeforeTaxAvailableforsaleFinancialAssets", "GainsLossesOnRemeasuringAvailableforsaleFinancialAssetsBeforeTax", 1.0),
-    ("OtherComprehensiveIncomeBeforeTaxAvailableforsaleFinancialAssets", "ReclassificationAdjustmentsOnAvailableforsaleFinancialAssetsBeforeTax", -1.0),
-    ("OtherComprehensiveIncomeBeforeTaxCashFlowHedges", "GainsLossesOnCashFlowHedgesBeforeTax", 1.0),
-    ("OtherComprehensiveIncomeBeforeTaxCashFlowHedges", "AmountsRemovedFromEquityAndIncludedInCarryingAmountOfNonfinancialAssetLiabilityWhoseAcquisitionOrIncurrenceWasHedgedHighlyProbableForecastTransactionBeforeTax", -1.0),
-    ("OtherComprehensiveIncomeBeforeTaxCashFlowHedges", "ReclassificationAdjustmentsOnCashFlowHedgesBeforeTax", -1.0),
-    ("OtherComprehensiveIncomeBeforeTaxChangeInValueOfForeignCurrencyBasisSpreads", "GainsLossesOnChangeInValueOfForeignCurrencyBasisSpreadsBeforeTax", 1.0),
-    ("OtherComprehensiveIncomeBeforeTaxChangeInValueOfForeignCurrencyBasisSpreads", "ReclassificationAdjustmentsOnChangeInValueOfForeignCurrencyBasisSpreadsBeforeTax", -1.0),
-    ("OtherComprehensiveIncomeBeforeTaxChangeInValueOfForwardElementsOfForwardContracts", "GainsLossesOnChangeInValueOfForwardElementsOfForwardContractsBeforeTax", 1.0),
-    ("OtherComprehensiveIncomeBeforeTaxChangeInValueOfForwardElementsOfForwardContracts", "ReclassificationAdjustmentsOnChangeInValueOfForwardElementsOfForwardContractsBeforeTax", -1.0),
-    ("OtherComprehensiveIncomeBeforeTaxChangeInValueOfTimeValueOfOptions", "GainsLossesOnChangeInValueOfTimeValueOfOptionsBeforeTax", 1.0),
-    ("OtherComprehensiveIncomeBeforeTaxChangeInValueOfTimeValueOfOptions", "ReclassificationAdjustmentsOnChangeInValueOfTimeValueOfOptionsBeforeTax", -1.0),
-    ("OtherComprehensiveIncomeBeforeTaxExchangeDifferencesOnTranslation", "GainsLossesOnExchangeDifferencesOnTranslationBeforeTax", 1.0),
-    ("OtherComprehensiveIncomeBeforeTaxExchangeDifferencesOnTranslation", "ReclassificationAdjustmentsOnExchangeDifferencesOnTranslationBeforeTax", -1.0),
-    ("OtherComprehensiveIncomeBeforeTaxFinanceIncomeExpensesFromReinsuranceContractsHeldExcludedFromProfitOrLoss", "FinanceIncomeExpensesFromReinsuranceContractsHeldExcludedFromProfitOrLossBeforeTax", 1.0),
-    ("OtherComprehensiveIncomeBeforeTaxFinanceIncomeExpensesFromReinsuranceContractsHeldExcludedFromProfitOrLoss", "ReclassificationAdjustmentsOnFinanceIncomeExpensesFromReinsuranceContractsHeldExcludedFromProfitOrLossBeforeTax", -1.0),
-    ("OtherComprehensiveIncomeBeforeTaxFinancialAssetsMeasuredAtFairValueThroughOtherComprehensiveIncome", "GainsLossesOnFinancialAssetsMeasuredAtFairValueThroughOtherComprehensiveIncomeBeforeTax", 1.0),
-    ("OtherComprehensiveIncomeBeforeTaxFinancialAssetsMeasuredAtFairValueThroughOtherComprehensiveIncome", "AmountsRemovedFromEquityAndAdjustedAgainstFairValueOfFinancialAssetsOnReclassificationOutOfFairValueThroughOtherComprehensiveIncomeMeasurementCategoryBeforeTax", -1.0),
-    ("OtherComprehensiveIncomeBeforeTaxFinancialAssetsMeasuredAtFairValueThroughOtherComprehensiveIncome", "ReclassificationAdjustmentsOnFinancialAssetsMeasuredAtFairValueThroughOtherComprehensiveIncomeBeforeTax", -1.0),
-    ("OtherComprehensiveIncomeBeforeTaxHedgesOfNetInvestmentsInForeignOperations", "GainsLossesOnHedgesOfNetInvestmentsInForeignOperationsBeforeTax", 1.0),
-    ("OtherComprehensiveIncomeBeforeTaxHedgesOfNetInvestmentsInForeignOperations", "ReclassificationAdjustmentsOnHedgesOfNetInvestmentsInForeignOperationsBeforeTax", -1.0),
-    ("OtherComprehensiveIncomeBeforeTaxInsuranceFinanceIncomeExpensesFromInsuranceContractsIssuedExcludedFromProfitOrLossThatWillBeReclassifiedToProfitOrLoss", "InsuranceFinanceIncomeExpensesFromInsuranceContractsIssuedExcludedFromProfitOrLossThatWillBeReclassifiedToProfitOrLossBeforeTax", 1.0),
-    ("OtherComprehensiveIncomeBeforeTaxInsuranceFinanceIncomeExpensesFromInsuranceContractsIssuedExcludedFromProfitOrLossThatWillBeReclassifiedToProfitOrLoss", "ReclassificationAdjustmentsOnInsuranceFinanceIncomeExpensesFromInsuranceContractsIssuedExcludedFromProfitOrLossBeforeTax", -1.0),
-    ("OtherComprehensiveIncomeNetOfTaxAvailableforsaleFinancialAssets", "GainsLossesOnRemeasuringAvailableforsaleFinancialAssetsNetOfTax", 1.0),
-    ("OtherComprehensiveIncomeNetOfTaxAvailableforsaleFinancialAssets", "ReclassificationAdjustmentsOnAvailableforsaleFinancialAssetsNetOfTax", -1.0),
-    ("OtherComprehensiveIncomeNetOfTaxCashFlowHedges", "GainsLossesOnCashFlowHedgesNetOfTax", 1.0),
-    ("OtherComprehensiveIncomeNetOfTaxCashFlowHedges", "AdjustmentsForAmountsTransferredToInitialCarryingAmountOfHedgedItems", -1.0),
-    ("OtherComprehensiveIncomeNetOfTaxCashFlowHedges", "ReclassificationAdjustmentsOnCashFlowHedgesNetOfTax", -1.0),
-    ("OtherComprehensiveIncomeNetOfTaxChangeInValueOfForeignCurrencyBasisSpreads", "GainsLossesOnChangeInValueOfForeignCurrencyBasisSpreadsNetOfTax", 1.0),
-    ("OtherComprehensiveIncomeNetOfTaxChangeInValueOfForeignCurrencyBasisSpreads", "ReclassificationAdjustmentsOnChangeInValueOfForeignCurrencyBasisSpreadsNetOfTax", -1.0),
-    ("OtherComprehensiveIncomeNetOfTaxChangeInValueOfForwardElementsOfForwardContracts", "GainsLossesOnChangeInValueOfForwardElementsOfForwardContractsNetOfTax", 1.0),
-    ("OtherComprehensiveIncomeNetOfTaxChangeInValueOfForwardElementsOfForwardContracts", "ReclassificationAdjustmentsOnChangeInValueOfForwardElementsOfForwardContractsNetOfTax", -1.0),
-    ("OtherComprehensiveIncomeNetOfTaxChangeInValueOfTimeValueOfOptions", "GainsLossesOnChangeInValueOfTimeValueOfOptionsNetOfTax", 1.0),
-    ("OtherComprehensiveIncomeNetOfTaxChangeInValueOfTimeValueOfOptions", "ReclassificationAdjustmentsOnChangeInValueOfTimeValueOfOptionsNetOfTax", -1.0),
-    ("OtherComprehensiveIncomeNetOfTaxExchangeDifferencesOnTranslation", "GainsLossesOnExchangeDifferencesOnTranslationNetOfTax", 1.0),
-    ("OtherComprehensiveIncomeNetOfTaxExchangeDifferencesOnTranslation", "ReclassificationAdjustmentsOnExchangeDifferencesOnTranslationNetOfTax", -1.0),
-    ("OtherComprehensiveIncomeNetOfTaxFinanceIncomeExpensesFromReinsuranceContractsHeldExcludedFromProfitOrLoss", "FinanceIncomeExpensesFromReinsuranceContractsHeldExcludedFromProfitOrLossNetOfTax", 1.0),
-    ("OtherComprehensiveIncomeNetOfTaxFinanceIncomeExpensesFromReinsuranceContractsHeldExcludedFromProfitOrLoss", "ReclassificationAdjustmentsOnFinanceIncomeExpensesFromReinsuranceContractsHeldExcludedFromProfitOrLossNetOfTax", -1.0),
-    ("OtherComprehensiveIncomeNetOfTaxFinancialAssetsMeasuredAtFairValueThroughOtherComprehensiveIncome", "GainsLossesOnFinancialAssetsMeasuredAtFairValueThroughOtherComprehensiveIncomeNetOfTax", 1.0),
-    ("OtherComprehensiveIncomeNetOfTaxFinancialAssetsMeasuredAtFairValueThroughOtherComprehensiveIncome", "AmountsRemovedFromEquityAndAdjustedAgainstFairValueOfFinancialAssetsOnReclassificationOutOfFairValueThroughOtherComprehensiveIncomeMeasurementCategoryNetOfTax", -1.0),
-    ("OtherComprehensiveIncomeNetOfTaxFinancialAssetsMeasuredAtFairValueThroughOtherComprehensiveIncome", "ReclassificationAdjustmentsOnFinancialAssetsMeasuredAtFairValueThroughOtherComprehensiveIncomeNetOfTax", -1.0),
-    ("OtherComprehensiveIncomeNetOfTaxHedgesOfNetInvestmentsInForeignOperations", "GainsLossesOnHedgesOfNetInvestmentsInForeignOperationsNetOfTax", 1.0),
-    ("OtherComprehensiveIncomeNetOfTaxHedgesOfNetInvestmentsInForeignOperations", "ReclassificationAdjustmentsOnHedgesOfNetInvestmentsInForeignOperationsNetOfTax", -1.0),
-    ("OtherComprehensiveIncomeNetOfTaxInsuranceFinanceIncomeExpensesFromInsuranceContractsIssuedExcludedFromProfitOrLossThatWillBeReclassifiedToProfitOrLoss", "InsuranceFinanceIncomeExpensesFromInsuranceContractsIssuedExcludedFromProfitOrLossThatWillBeReclassifiedToProfitOrLossNetOfTax", 1.0),
-    ("OtherComprehensiveIncomeNetOfTaxInsuranceFinanceIncomeExpensesFromInsuranceContractsIssuedExcludedFromProfitOrLossThatWillBeReclassifiedToProfitOrLoss", "ReclassificationAdjustmentsOnInsuranceFinanceIncomeExpensesFromInsuranceContractsIssuedExcludedFromProfitOrLossNetOfTax", -1.0),
-    ("OtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLossBeforeTax", "OtherComprehensiveIncomeBeforeTaxAvailableforsaleFinancialAssets", 1.0),
-    ("OtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLossBeforeTax", "OtherComprehensiveIncomeBeforeTaxCashFlowHedges", 1.0),
-    ("OtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLossBeforeTax", "OtherComprehensiveIncomeBeforeTaxChangeInValueOfForeignCurrencyBasisSpreads", 1.0),
-    ("OtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLossBeforeTax", "OtherComprehensiveIncomeBeforeTaxChangeInValueOfForwardElementsOfForwardContracts", 1.0),
-    ("OtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLossBeforeTax", "OtherComprehensiveIncomeBeforeTaxChangeInValueOfTimeValueOfOptions", 1.0),
-    ("OtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLossBeforeTax", "OtherComprehensiveIncomeBeforeTaxExchangeDifferencesOnTranslation", 1.0),
-    ("OtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLossBeforeTax", "OtherComprehensiveIncomeBeforeTaxFinanceIncomeExpensesFromReinsuranceContractsHeldExcludedFromProfitOrLoss", 1.0),
-    ("OtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLossBeforeTax", "OtherComprehensiveIncomeBeforeTaxFinancialAssetsMeasuredAtFairValueThroughOtherComprehensiveIncome", 1.0),
-    ("OtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLossBeforeTax", "OtherComprehensiveIncomeBeforeTaxHedgesOfNetInvestmentsInForeignOperations", 1.0),
-    ("OtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLossBeforeTax", "OtherComprehensiveIncomeBeforeTaxInsuranceFinanceIncomeExpensesFromInsuranceContractsIssuedExcludedFromProfitOrLossThatWillBeReclassifiedToProfitOrLoss", 1.0),
-    ("OtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLossBeforeTax", "ShareOfOtherComprehensiveIncomeOfAssociatesAndJointVenturesAccountedForUsingEquityMethodThatWillBeReclassifiedToProfitOrLossBeforeTax", 1.0),
-    ("OtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLossNetOfTax", "OtherComprehensiveIncomeNetOfTaxAvailableforsaleFinancialAssets", 1.0),
-    ("OtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLossNetOfTax", "OtherComprehensiveIncomeNetOfTaxCashFlowHedges", 1.0),
-    ("OtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLossNetOfTax", "OtherComprehensiveIncomeNetOfTaxChangeInValueOfForeignCurrencyBasisSpreads", 1.0),
-    ("OtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLossNetOfTax", "OtherComprehensiveIncomeNetOfTaxChangeInValueOfForwardElementsOfForwardContracts", 1.0),
-    ("OtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLossNetOfTax", "OtherComprehensiveIncomeNetOfTaxChangeInValueOfTimeValueOfOptions", 1.0),
-    ("OtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLossNetOfTax", "OtherComprehensiveIncomeNetOfTaxExchangeDifferencesOnTranslation", 1.0),
-    ("OtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLossNetOfTax", "OtherComprehensiveIncomeNetOfTaxFinanceIncomeExpensesFromReinsuranceContractsHeldExcludedFromProfitOrLoss", 1.0),
-    ("OtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLossNetOfTax", "OtherComprehensiveIncomeNetOfTaxFinancialAssetsMeasuredAtFairValueThroughOtherComprehensiveIncome", 1.0),
-    ("OtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLossNetOfTax", "OtherComprehensiveIncomeNetOfTaxHedgesOfNetInvestmentsInForeignOperations", 1.0),
-    ("OtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLossNetOfTax", "OtherComprehensiveIncomeNetOfTaxInsuranceFinanceIncomeExpensesFromInsuranceContractsIssuedExcludedFromProfitOrLossThatWillBeReclassifiedToProfitOrLoss", 1.0),
-    ("OtherComprehensiveIncomeThatWillBeReclassifiedToProfitOrLossNetOfTax", "ShareOfOtherComprehensiveIncomeOfAssociatesAndJointVenturesAccountedForUsingEquityMethodThatWillBeReclassifiedToProfitOrLossNetOfTax", 1.0),
-    ("OtherComprehensiveIncomeThatWillNotBeReclassifiedToProfitOrLossBeforeTax", "OtherComprehensiveIncomeBeforeTaxChangeInFairValueOfFinancialLiabilityAttributableToChangeInCreditRiskOfLiability", 1.0),
-    ("OtherComprehensiveIncomeThatWillNotBeReclassifiedToProfitOrLossBeforeTax", "OtherComprehensiveIncomeBeforeTaxExchangeDifferencesOnTranslationOtherThanTranslationOfForeignOperations", 1.0),
-    ("OtherComprehensiveIncomeThatWillNotBeReclassifiedToProfitOrLossBeforeTax", "OtherComprehensiveIncomeBeforeTaxGainsLossesFromInvestmentsInEquityInstruments", 1.0),
-    ("OtherComprehensiveIncomeThatWillNotBeReclassifiedToProfitOrLossBeforeTax", "OtherComprehensiveIncomeBeforeTaxGainsLossesOnHedgingInstrumentsThatHedgeInvestmentsInEquityInstruments", 1.0),
-    ("OtherComprehensiveIncomeThatWillNotBeReclassifiedToProfitOrLossBeforeTax", "OtherComprehensiveIncomeBeforeTaxGainsLossesOnRemeasurementsOfDefinedBenefitPlans", 1.0),
-    ("OtherComprehensiveIncomeThatWillNotBeReclassifiedToProfitOrLossBeforeTax", "OtherComprehensiveIncomeBeforeTaxGainsLossesOnRevaluation", 1.0),
-    ("OtherComprehensiveIncomeThatWillNotBeReclassifiedToProfitOrLossBeforeTax", "OtherComprehensiveIncomeBeforeTaxInsuranceFinanceIncomeExpensesFromInsuranceContractsIssuedExcludedFromProfitOrLossThatWillNotBeReclassifiedToProfitOrLoss", 1.0),
-    ("OtherComprehensiveIncomeThatWillNotBeReclassifiedToProfitOrLossBeforeTax", "ShareOfOtherComprehensiveIncomeOfAssociatesAndJointVenturesAccountedForUsingEquityMethodThatWillNotBeReclassifiedToProfitOrLossBeforeTax", 1.0),
-    ("OtherComprehensiveIncomeThatWillNotBeReclassifiedToProfitOrLossNetOfTax", "OtherComprehensiveIncomeNetOfTaxChangeInFairValueOfFinancialLiabilityAttributableToChangeInCreditRiskOfLiability", 1.0),
-    ("OtherComprehensiveIncomeThatWillNotBeReclassifiedToProfitOrLossNetOfTax", "OtherComprehensiveIncomeNetOfTaxExchangeDifferencesOnTranslationOtherThanTranslationOfForeignOperations", 1.0),
-    ("OtherComprehensiveIncomeThatWillNotBeReclassifiedToProfitOrLossNetOfTax", "OtherComprehensiveIncomeNetOfTaxGainsLossesFromInvestmentsInEquityInstruments", 1.0),
-    ("OtherComprehensiveIncomeThatWillNotBeReclassifiedToProfitOrLossNetOfTax", "OtherComprehensiveIncomeNetOfTaxGainsLossesOnHedgingInstrumentsThatHedgeInvestmentsInEquityInstruments", 1.0),
-    ("OtherComprehensiveIncomeThatWillNotBeReclassifiedToProfitOrLossNetOfTax", "OtherComprehensiveIncomeNetOfTaxGainsLossesOnRemeasurementsOfDefinedBenefitPlans", 1.0),
-    ("OtherComprehensiveIncomeThatWillNotBeReclassifiedToProfitOrLossNetOfTax", "OtherComprehensiveIncomeNetOfTaxGainsLossesOnRevaluation", 1.0),
-    ("OtherComprehensiveIncomeThatWillNotBeReclassifiedToProfitOrLossNetOfTax", "OtherComprehensiveIncomeNetOfTaxInsuranceFinanceIncomeExpensesFromInsuranceContractsIssuedExcludedFromProfitOrLossThatWillNotBeReclassifiedToProfitOrLoss", 1.0),
-    ("OtherComprehensiveIncomeThatWillNotBeReclassifiedToProfitOrLossNetOfTax", "ShareOfOtherComprehensiveIncomeOfAssociatesAndJointVenturesAccountedForUsingEquityMethodThatWillNotBeReclassifiedToProfitOrLossNetOfTax", 1.0),
-    ("ProfitLoss", "ProfitLossFromContinuingOperations", 1.0),
-    ("ProfitLoss", "ProfitLossFromDiscontinuedOperations", 1.0),
-    ("ProfitLossBeforeTax", "CumulativeGainLossPreviouslyRecognisedInOtherComprehensiveIncomeArisingFromReclassificationOfFinancialAssetsOutOfFairValueThroughOtherComprehensiveIncomeIntoFairValueThroughProfitOrLossMeasurementCategory", 1.0),
-    ("ProfitLossBeforeTax", "DifferenceBetweenCarryingAmountOfDividendsPayableAndCarryingAmountOfNoncashAssetsDistributed", 1.0),
-    ("ProfitLossBeforeTax", "FinanceIncome", 1.0),
-    ("ProfitLossBeforeTax", "FinanceIncomeExpensesFromReinsuranceContractsHeldRecognisedInProfitOrLoss", 1.0),
-    ("ProfitLossBeforeTax", "GainLossArisingFromDerecognitionOfFinancialAssetsMeasuredAtAmortisedCost", 1.0),
-    ("ProfitLossBeforeTax", "GainsLossesArisingFromDifferenceBetweenPreviousCarryingAmountAndFairValueOfFinancialAssetsReclassifiedAsMeasuredAtFairValue", 1.0),
-    ("ProfitLossBeforeTax", "GainsLossesOnNetMonetaryPosition", 1.0),
-    ("ProfitLossBeforeTax", "HedgingGainsLossesForHedgeOfGroupOfItemsWithOffsettingRiskPositions", 1.0),
-    ("ProfitLossBeforeTax", "InsuranceFinanceIncomeExpensesFromInsuranceContractsIssuedRecognisedInProfitOrLoss", 1.0),
-    ("ProfitLossBeforeTax", "OtherIncomeExpenseFromSubsidiariesJointlyControlledEntitiesAndAssociates", 1.0),
-    ("ProfitLossBeforeTax", "ProfitLossFromOperatingActivities", 1.0),
-    ("ProfitLossBeforeTax", "ShareOfProfitLossOfAssociatesAndJointVenturesAccountedForUsingEquityMethod", 1.0),
-    ("ProfitLossBeforeTax", "FinanceCosts", -1.0),
-    ("ProfitLossBeforeTax", "ImpairmentLossImpairmentGainAndReversalOfImpairmentLossDeterminedInAccordanceWithIFRS9", -1.0),
-    ("ProfitLossFromContinuingOperations", "ProfitLossBeforeTax", 1.0),
-    ("ProfitLossFromContinuingOperations", "IncomeTaxExpenseContinuingOperations", -1.0),
-    ("ProfitLossFromOperatingActivities", "GrossProfit", 1.0),
-    ("ProfitLossFromOperatingActivities", "IncomeExpensesFromReinsuranceContractsHeldOtherThanFinanceIncomeExpenses", 1.0),
-    ("ProfitLossFromOperatingActivities", "OtherGainsLosses", 1.0),
-    ("ProfitLossFromOperatingActivities", "OtherIncome", 1.0),
-    ("ProfitLossFromOperatingActivities", "OtherWorkPerformedByEntityAndCapitalised", 1.0),
-    ("ProfitLossFromOperatingActivities", "Revenue", 1.0),
-    ("ProfitLossFromOperatingActivities", "AdministrativeExpense", -1.0),
-    ("ProfitLossFromOperatingActivities", "ChangesInInventoriesOfFinishedGoodsAndWorkInProgress", -1.0),
-    ("ProfitLossFromOperatingActivities", "DepreciationAndAmortisationExpense", -1.0),
-    ("ProfitLossFromOperatingActivities", "DistributionCosts", -1.0),
-    ("ProfitLossFromOperatingActivities", "EmployeeBenefitsExpense", -1.0),
-    ("ProfitLossFromOperatingActivities", "ImpairmentLossReversalOfImpairmentLossRecognisedInProfitOrLoss", -1.0),
-    ("ProfitLossFromOperatingActivities", "InsuranceServiceExpensesFromInsuranceContractsIssued", -1.0),
-    ("ProfitLossFromOperatingActivities", "OtherExpenseByFunction", -1.0),
-    ("ProfitLossFromOperatingActivities", "OtherExpenseByNature", -1.0),
-    ("ProfitLossFromOperatingActivities", "RawMaterialsAndConsumablesUsed", -1.0),
-    ("Provisions", "OtherProvisions", 1.0),
-    ("Provisions", "ProvisionsForEmployeeBenefits", 1.0),
-]
+def load_calculation_rules() -> list[tuple[str, str, float]]:
+    """
+    (parent, child, weight) summation triples — weight +1.0 for addition,
+    -1.0 for subtraction, e.g. GrossProfit = Revenue - CostOfSales.
+
+    Parsed directly from the IFRS Accounting Taxonomy's own calculation
+    linkbase XML (data/taxonomy/linkbases/*/cal_*.xml — Statement of
+    Financial Position, Profit or Loss, Comprehensive Income, Changes in
+    Equity, Cash Flows) rather than hand-transcribed, so it can't silently
+    drift out of sync with the taxonomy: a hand-transcribed copy of this
+    same data was previously missing ~90 of the 415 real summation arcs
+    the linkbase XML actually defines.
+
+    Each linkbase file defines <link:loc> elements mapping a short local
+    label (e.g. "loc_1") to a tag name via its xlink:href fragment, and
+    <link:calculationArc> elements connecting two such labels with a
+    weight — this resolves the arcs' labels back to tag names via each
+    file's own loc map (labels aren't unique across files).
+    """
+    ns = {
+        "link":  "http://www.xbrl.org/2003/linkbase",
+        "xlink": "http://www.w3.org/1999/xlink",
+    }
+    rules: set[tuple[str, str, float]] = set()
+
+    for path in sorted(glob.glob("data/taxonomy/linkbases/*/cal_*.xml")):
+        root = ET.parse(path).getroot()
+        label_to_tag = {}
+        for loc in root.findall(".//link:loc", ns):
+            href = loc.get(f"{{{ns['xlink']}}}href", "")
+            if "#ifrs-full_" in href:
+                label = loc.get(f"{{{ns['xlink']}}}label")
+                label_to_tag[label] = href.split("#ifrs-full_")[-1]
+
+        for arc in root.findall(".//link:calculationArc", ns):
+            from_tag = label_to_tag.get(arc.get(f"{{{ns['xlink']}}}from"))
+            to_tag   = label_to_tag.get(arc.get(f"{{{ns['xlink']}}}to"))
+            weight   = arc.get("weight")
+            if from_tag and to_tag and weight:
+                rules.add((from_tag, to_tag, float(weight)))
+
+    return sorted(rules)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -542,22 +256,15 @@ class GraphDBLoader:
         g.bind("rdfs", RDFS)
 
         counts = {2: 0, 4: 0, 6: 0, 8: 0}
+        node_types = {2: KG.Sector, 4: KG.IndustryGroup, 6: KG.Industry, 8: KG.SubIndustry}
 
         for code, data in gics_definition.items():
             name = data.get("name", "")
             desc = data.get("description", "")
             n    = len(code)
 
-            # Determine node type
-            if n == 2:
-                node_type = KG.Sector
-            elif n == 4:
-                node_type = KG.IndustryGroup
-            elif n == 6:
-                node_type = KG.Industry
-            elif n == 8:
-                node_type = KG.SubIndustry
-            else:
+            node_type = node_types.get(n)
+            if node_type is None:
                 continue
 
             uri = GICS[code]
@@ -662,7 +369,7 @@ class GraphDBLoader:
         g.bind("kg",   KG)
 
         pos_count, neg_count = 0, 0
-        for parent_tag, child_tag, weight in HAS_CHILD_TAG_RULES:
+        for parent_tag, child_tag, weight in load_calculation_rules():
             if parent_tag not in ifrs_definition or child_tag not in ifrs_definition:
                 continue
             if weight > 0:

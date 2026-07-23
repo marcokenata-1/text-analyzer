@@ -154,11 +154,10 @@ scripts/
   d_20230318.py, ifrs_tags.py, universal_ifrs_tags.py
                              Static GICS/IFRS taxonomy definitions
 
-data/
-  mappings/                Not committed — SubIndustry->XBRL tag mapping
-                             files, extraction fixtures (see below)
-  taxonomy/                 Committed — official IFRS Accounting Taxonomy label XML
-  chromadb/, chroma_db/     Not committed — local ChromaDB persistent storage
+data/                      Not committed — see "Generating the data" below
+  mappings/                SubIndustry->XBRL tag mapping files, extraction fixtures
+  taxonomy/                 Official IFRS Accounting Taxonomy (schema, labels, linkbases)
+  chromadb/, chroma_db/     Local ChromaDB persistent storage
 
 logs/                       Not committed — saved /reason + /validate output
                              per test fixture, regenerate by rerunning the
@@ -168,12 +167,29 @@ docs/                       Research report
 
 ## Generating the data
 
-`data/mappings/`, `data/chromadb/`, `data/chroma_db/`, and `logs/` are
-gitignored — they're regenerable pipeline output, not source.
-`data/taxonomy/` (the official IFRS Accounting Taxonomy 2025 package —
-`full_ifrs-cor_2025-03-27.xsd`, `lab_full_ifrs-en_2025-03-27.xml`, and the
-`linkbases/` folder) is committed, since it's small, static reference data
-everything else in this repo depends on.
+All of `data/` and `logs/` are gitignored — none of it is source, all of
+it is either regenerable pipeline output or external reference data with
+a documented way to obtain it.
+
+**`data/taxonomy/`** — the official IFRS Accounting Taxonomy package
+(`full_ifrs-cor_*.xsd`, `lab_full_ifrs-en_*.xml`, and the `linkbases/`
+folder, which `build_graphdb.load_calculation_rules()` parses directly
+instead of using a hand-maintained rule list):
+1. Download the **full package** zip (e.g. `IFRSAT-2025.zip`, not an
+   individual standard) from the
+   [IFRS Accounting Taxonomy page](https://www.ifrs.org/issued-standards/ifrs-taxonomy/)
+   (free registration required) — the full package includes every
+   standard's calculation linkbase, not just IAS 1/IAS 7.
+2. From the zip's `full_ifrs/` folder, copy `full_ifrs-cor_*.xsd` and
+   `labels/lab_full_ifrs-en_*.xml` to `data/taxonomy/`, and the entire
+   `linkbases/` folder to `data/taxonomy/linkbases/` (all standards, not
+   a subset — `load_calculation_rules()` only reads the `cal_*.xml` files
+   within it, but the full linkbase tree is still the actual official
+   source of truth to keep on hand).
+3. Rerun `build_graphdb.main()` to reload GraphDB with the updated rules.
+4. If the new taxonomy adds/renames tags, `scripts/ifrs_tags.py` (the
+   static tag definition dict) needs regenerating too — not automated
+   yet, would need to be parsed from the new `full_ifrs-cor_*.xsd`.
 
 To reproduce the rest from a fresh clone:
 

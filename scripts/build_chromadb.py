@@ -10,14 +10,17 @@ Two collections (mirrors the Knowledge Graph node types):
     gics_definitions — one entry per GICS Sector/IndustryGroup/Industry/SubIndustry
     xbrl_tags        — one entry per IFRS XBRL tag
 
-Embeddings use all-MiniLM-L6-v2, a sentence-similarity model trained with
-a contrastive objective. The report (Sec 2.4.3) suggests FinBERT for its
+Embeddings use BAAI/bge-base-en-v1.5 (MODEL_NAME below), a general-purpose
+sentence-similarity model. The report (Sec 2.4.3) suggests FinBERT for its
 financial-domain vocabulary, but empirically FinBERT's embeddings — from a
 sentiment-classification head, not a similarity-trained one — performed
 markedly worse here than a general-purpose sentence-similarity model on
-both GICS paragraph matching and short XBRL label matching. Domain tuning
-doesn't help if the embedding space itself isn't optimized for "are these
-semantically related."
+both GICS paragraph matching and short XBRL label matching. A finance-
+tuned alternative (FinLang/finance-embeddings-investopedia) was also
+evaluated and rejected — see api.py's module docstring for why. Domain
+tuning doesn't help if the embedding space itself isn't optimized for
+"are these semantically related," and can actively hurt if it narrows the
+space to one financial-text style at the expense of general matching.
 
 Setup:
     pip install chromadb sentence-transformers
@@ -38,7 +41,7 @@ from build_graphdb import load_ifrs_labels, camel_to_sentence
 # ── Config ─────────────────────────────────────────────────────────────────────
 CHROMA_HOST      = "localhost"
 CHROMA_PORT      = 8001
-MODEL_NAME       = "all-MiniLM-L6-v2"
+MODEL_NAME       = "BAAI/bge-base-en-v1.5"
 BATCH_SIZE       = 256
 OLLAMA_MODEL     = "llama3.1"
 
@@ -47,10 +50,10 @@ GICS_LEVELS = {2: "Sector", 4: "IndustryGroup", 6: "Industry", 8: "SubIndustry"}
 
 def generate_synonym_map(short_labels: list[tuple[str, str]]) -> dict[str, list[str]]:
     """
-    Ask Ollama for common alternate names of short (<=2 word) tag labels —
+    Ask Ollama for common alternate names of short (<=3 word) tag labels —
     e.g. "Revenue" -> "net sales", "turnover". Only short labels are worth
     asking about: a bag-of-words-ish embedding has nothing to disambiguate
-    "Revenue" from "Cost Of Sales" on a 1-2 word label, but longer compound
+    "Revenue" from "Cost Of Sales" on a short label, but longer compound
     labels ("Cash Flows From Used In Financing Activities") rarely collide.
     Generated at build time so this tracks whatever tags/labels the current
     IFRS taxonomy defines, instead of a hand-maintained list going stale.
@@ -177,6 +180,13 @@ def build_xbrl_documents(label_map: dict, synonym_map: dict):
     return ids, documents, metadatas
 
 
+def recreate_collection(client, name: str):
+    """Delete `name` if it already exists, then create it fresh (cosine space)."""
+    if name in [c.name for c in client.list_collections()]:
+        client.delete_collection(name)
+    return client.create_collection(name, metadata={"hnsw:space": "cosine"})
+
+
 def embed_and_add(collection, model, ids, documents, metadatas):
     for i in range(0, len(ids), BATCH_SIZE):
         batch_docs  = documents[i:i + BATCH_SIZE]
@@ -216,19 +226,13 @@ def main():
     client = chromadb.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
 
     print("\n[3] Building gics_definitions collection...")
-    client.delete_collection("gics_definitions") if "gics_definitions" in [c.name for c in client.list_collections()] else None
-    gics_collection = client.create_collection(
-        "gics_definitions", metadata={"hnsw:space": "cosine"}
-    )
+    gics_collection = recreate_collection(client, "gics_definitions")
     g_ids, g_docs, g_meta = build_gics_documents()
     embed_and_add(gics_collection, model, g_ids, g_docs, g_meta)
     print(f"  ✓ {len(g_ids)} GICS definitions embedded")
 
     print("\n[4] Building xbrl_tags collection...")
-    client.delete_collection("xbrl_tags") if "xbrl_tags" in [c.name for c in client.list_collections()] else None
-    xbrl_collection = client.create_collection(
-        "xbrl_tags", metadata={"hnsw:space": "cosine"}
-    )
+    xbrl_collection = recreate_collection(client, "xbrl_tags")
     x_ids, x_docs, x_meta = build_xbrl_documents(label_map, synonym_map)
     embed_and_add(xbrl_collection, model, x_ids, x_docs, x_meta)
     print(f"  ✓ {len(x_ids)} XBRL tags embedded")

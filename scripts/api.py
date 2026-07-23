@@ -34,13 +34,17 @@ requiring the client to chain calls:
         to /reason) is a separate, Reasoning-Layer-side step, not done
         automatically by this endpoint.
 
-Both GICS inference and Semantic Mapper matching use all-MiniLM-L6-v2, a
-sentence-similarity model trained with a contrastive objective, rather
-than FinBERT (Sec 2.4.3's suggestion). Empirically FinBERT's embeddings —
-from a sentiment-classification head, not a similarity-trained one —
-performed markedly worse on both GICS paragraph matching and short XBRL
-label matching. Domain-tuned vocabulary doesn't help if the embedding
-space itself isn't optimized for "are these semantically related."
+Both GICS inference and Semantic Mapper matching use BAAI/bge-base-en-v1.5
+(MODEL_NAME below) — a general-purpose sentence-similarity model. A
+finance-tuned alternative (FinLang/finance-embeddings-investopedia) was
+evaluated and rejected: it improved fine-grained XBRL tag discrimination
+but collapsed GICS classification (multiple unrelated companies converged
+on the same wrong SubIndustry) — over-specialization to one financial-text
+style generalizing poorly to the broader matching this service needs.
+FinBERT (Sec 2.4.3's suggestion) was rejected earlier for the same reason:
+a sentiment-classification head, not a similarity-trained embedding, does
+markedly worse on both GICS paragraph matching and short XBRL label
+matching regardless of domain vocabulary.
 
 Run:
     PYTHONPATH=scripts uvicorn api:app --reload --port 8000
@@ -67,13 +71,14 @@ GRAPHDB_URL      = os.environ.get("GRAPHDB_URL", "http://localhost:7200")
 REPOSITORY       = os.environ.get("GRAPHDB_REPOSITORY", "ifrs-gics")
 CHROMA_HOST      = os.environ.get("CHROMA_HOST", "localhost")
 CHROMA_PORT      = int(os.environ.get("CHROMA_PORT", "8001"))
-MODEL_NAME       = "all-MiniLM-L6-v2"
+MODEL_NAME       = "BAAI/bge-base-en-v1.5"
 SPARQL_URL       = f"{GRAPHDB_URL}/repositories/{REPOSITORY}"
 
 GICS_LEVELS    = [2, 4, 6, 8]
 LEVEL_NAMES    = {2: "Sector", 4: "IndustryGroup", 6: "Industry", 8: "SubIndustry"}
 BOILERPLATE    = re.compile(r"^(total|other|net)\b", re.I)
 SUM_TOLERANCE  = 0.02   # 2% relative tolerance for the UC4 Summation Check
+COMPANY_WEIGHT = 0.7    # favors company signal — see infer_gics_subindustry docstring
 
 PREFIXES = """
     PREFIX kg:   <http://ifrs-gics.ontotext.com/ontology/>
@@ -282,7 +287,6 @@ def infer_gics_subindustry(
     signal = [d for d in descriptions if not BOILERPLATE.match(d.strip())] or descriptions
     items_emb = _model.encode([". ".join(signal)], convert_to_tensor=True, normalize_embeddings=True)
     if company_description:
-        COMPANY_WEIGHT = 0.7  # favors company signal — see infer_gics_subindustry docstring
         company_emb = _model.encode([company_description], convert_to_tensor=True, normalize_embeddings=True)
         q_emb = COMPANY_WEIGHT * company_emb + (1 - COMPANY_WEIGHT) * items_emb
         q_emb = q_emb / q_emb.norm(dim=1, keepdim=True)
@@ -307,17 +311,11 @@ def infer_gics_subindustry(
     return final_code, final_name, final_score, path
 
 
-def fetch_relevant_tags(si_code: str) -> list[str]:
-    """Pruned candidate XBRL tags for a sub-industry, via GraphDB HAS_RELEVANT_TAG."""
-    query = PREFIXES + f"""
-        SELECT ?tagName WHERE {{
-            gics:{si_code} kg:HAS_RELEVANT_TAG ?t .
-            ?t ifrs:tagName ?tagName .
-        }}
-    """
+def _sparql_select(query: str) -> list[dict]:
+    """Run a SPARQL SELECT against GraphDB, return its result bindings."""
     resp = requests.get(
         SPARQL_URL,
-        params={"query": query},
+        params={"query": PREFIXES + query},
         headers={"Accept": "application/sparql-results+json"},
     )
     if resp.status_code != 200:
@@ -325,7 +323,17 @@ def fetch_relevant_tags(si_code: str) -> list[str]:
             status_code=502,
             detail=f"GraphDB query failed: {resp.status_code} {resp.text[:200]}",
         )
-    bindings = resp.json()["results"]["bindings"]
+    return resp.json()["results"]["bindings"]
+
+
+def fetch_relevant_tags(si_code: str) -> list[str]:
+    """Pruned candidate XBRL tags for a sub-industry, via GraphDB HAS_RELEVANT_TAG."""
+    bindings = _sparql_select(f"""
+        SELECT ?tagName WHERE {{
+            gics:{si_code} kg:HAS_RELEVANT_TAG ?t .
+            ?t ifrs:tagName ?tagName .
+        }}
+    """)
     return [b["tagName"]["value"] for b in bindings]
 
 
@@ -348,7 +356,7 @@ def fetch_summation_rules() -> dict[str, list[tuple[str, float]]]:
     the IFRS taxonomy's calculation linkbases, e.g. GrossProfit = Revenue
     (+1.0) - CostOfSales (-1.0).
     """
-    query = PREFIXES + """
+    bindings = _sparql_select("""
         SELECT ?parentName ?childName ?sign WHERE {
             { ?parent kg:HAS_CHILD_TAG ?child . BIND("+" AS ?sign) }
             UNION
@@ -356,19 +364,9 @@ def fetch_summation_rules() -> dict[str, list[tuple[str, float]]]:
             ?parent ifrs:tagName ?parentName .
             ?child  ifrs:tagName ?childName .
         }
-    """
-    resp = requests.get(
-        SPARQL_URL,
-        params={"query": query},
-        headers={"Accept": "application/sparql-results+json"},
-    )
-    if resp.status_code != 200:
-        raise HTTPException(
-            status_code=502,
-            detail=f"GraphDB query failed: {resp.status_code} {resp.text[:200]}",
-        )
+    """)
     rules: dict[str, list[tuple[str, float]]] = {}
-    for b in resp.json()["results"]["bindings"]:
+    for b in bindings:
         weight = 1.0 if b["sign"]["value"] == "+" else -1.0
         rules.setdefault(b["parentName"]["value"], []).append((b["childName"]["value"], weight))
     return rules
@@ -501,6 +499,104 @@ def reason(request: ClassifyRequest):
     return ReasoningResponse(gics=gics, mappings=mappings)
 
 
+def _check_structural_pool(mappings, candidate_tags: set[str], gics_name: str) -> list[StructuralIssue]:
+    """Every assigned tag must fall within the GICS-pruned candidate pool —
+    a guard against the ReAct Agent or Semantic Mapper drifting outside it."""
+    return [
+        StructuralIssue(
+            id=m.id, tag=m.tag,
+            issue=f"'{m.tag}' is not in the pruned candidate pool for {gics_name}",
+        )
+        for m in mappings
+        if m.tag and m.tag not in candidate_tags
+    ]
+
+
+def _group_amounts_by_tag(mappings) -> dict[str, list[tuple[int, float]]]:
+    amounts_by_tag: dict[str, list[tuple[int, float]]] = {}
+    for m in mappings:
+        if not m.tag:
+            continue
+        amount = parse_amount(m.amount)
+        if amount is None:
+            continue
+        amounts_by_tag.setdefault(m.tag, []).append((m.id, amount))
+    return amounts_by_tag
+
+
+def _find_conflicted_tags(
+    amounts_by_tag: dict[str, list[tuple[int, float]]],
+    summation_rules: dict[str, list[tuple[str, float]]],
+) -> tuple[set[str], list[StructuralIssue]]:
+    """
+    A tag used as a summation parent represents one report-level total by
+    definition — if >1 item maps directly to it, that's an unresolved
+    mapping conflict (e.g. a cash-flow line lexically overlapping a balance
+    total's label), not additional components to sum. Summing them silently
+    corrupts "reported" — surface the conflict instead and skip the check
+    for that tag rather than report a diff computed from a bad number.
+
+    A conflicted tag is equally untrustworthy wherever else it's used — a
+    tag like EquityAttributableToOwnersOfParent is both a check's own
+    "reported" value AND a child contributing to Equity's "computed" sum;
+    skipping only the former still lets the same bad entries corrupt the
+    latter. The returned set is meant to be excluded from every parent's
+    child_entries too, not just its own check.
+    """
+    conflicted_tags: set[str] = set()
+    issues = []
+    for parent_tag in summation_rules:
+        entries = amounts_by_tag.get(parent_tag, [])
+        if len(entries) > 1:
+            conflicted_tags.add(parent_tag)
+            ids = ", ".join(str(id_) for id_, _ in entries)
+            issues.append(StructuralIssue(
+                id=entries[0][0], tag=parent_tag,
+                issue=f"{len(entries)} items (ids: {ids}) mapped directly to summary tag "
+                      f"'{parent_tag}' — expected exactly one; summation check skipped for this tag",
+            ))
+    return conflicted_tags, issues
+
+
+def _check_summations(
+    amounts_by_tag: dict[str, list[tuple[int, float]]],
+    summation_rules: dict[str, list[tuple[str, float]]],
+    conflicted_tags: set[str],
+) -> list[SummationIssue]:
+    """For every HAS_CHILD_TAG rule, if the parent tag has exactly one
+    reported amount and at least one (non-conflicted) child was assigned,
+    verify Total Reported = Sum(Component Extracted) within SUM_TOLERANCE."""
+    issues = []
+    for parent_tag, weighted_children in summation_rules.items():
+        if parent_tag not in amounts_by_tag or len(amounts_by_tag[parent_tag]) != 1:
+            continue
+        # (id, signed_amount) for every child tag actually assigned in this ledger.
+        # abs(amt): `amt` already carries the PDF's parenthesis-as-negative
+        # convention (parse_amount), which independently encodes "subtract this" —
+        # the same intent as a -1 calculation weight. Applying both double-flips
+        # the sign, so normalize to magnitude before the weight decides sign.
+        child_entries = [
+            (id_, weight * abs(amt))
+            for child_tag, weight in weighted_children
+            if child_tag not in conflicted_tags
+            for id_, amt in amounts_by_tag.get(child_tag, [])
+        ]
+        if not child_entries:
+            continue  # no components assigned in this ledger — nothing to check
+
+        reported = sum(amt for _, amt in amounts_by_tag[parent_tag])
+        computed = sum(amt for _, amt in child_entries)
+        difference   = abs(reported - computed)
+        relative_gap = difference / abs(reported) if reported else float(computed != 0)
+
+        if relative_gap > SUM_TOLERANCE:
+            issues.append(SummationIssue(
+                parentTag=parent_tag, reportedAmount=reported, computedAmount=computed,
+                difference=difference, childIds=[id_ for id_, _ in child_entries],
+            ))
+    return issues
+
+
 @app.post("/validate", response_model=LedgerResponse)
 def validate(request: ReasoningResponse):
     """
@@ -510,6 +606,8 @@ def validate(request: ReasoningResponse):
          the GraphDB-pruned candidate pool for the identified sub-industry
          (Sec 3.5.1's Contextual Pruning, re-checked here as a guard
          against the ReAct Agent or Semantic Mapper drifting outside it).
+         Also flags conflicting mappings — multiple items mapped directly
+         to the same summation-parent tag (see _find_conflicted_tags).
       2. Summation Check — for every HAS_CHILD_TAG rule in the Knowledge
          Graph, if both the parent tag and at least one child tag were
          assigned amounts in this ledger, verify
@@ -523,71 +621,15 @@ def validate(request: ReasoningResponse):
     triggered by the caller on a rejection signal, not done automatically
     by this endpoint.
     """
-    candidate_tags = set(fetch_relevant_tags(request.gics.code))
-
-    structural_issues = [
-        StructuralIssue(
-            id=m.id, tag=m.tag,
-            issue=f"'{m.tag}' is not in the pruned candidate pool for {request.gics.name}",
-        )
-        for m in request.mappings
-        if m.tag and m.tag not in candidate_tags
-    ]
-
-    amounts_by_tag: dict[str, list[tuple[int, float]]] = {}
-    for m in request.mappings:
-        if not m.tag:
-            continue
-        amount = parse_amount(m.amount)
-        if amount is None:
-            continue
-        amounts_by_tag.setdefault(m.tag, []).append((m.id, amount))
-
+    candidate_tags  = set(fetch_relevant_tags(request.gics.code))
     summation_rules = fetch_summation_rules()
+    amounts_by_tag  = _group_amounts_by_tag(request.mappings)
 
-    # A tag used as a summation parent represents one report-level total by
-    # definition — if >1 item maps directly to it, that's an unresolved
-    # mapping conflict (e.g. a cash-flow line lexically overlapping a balance
-    # total's label), not additional components to sum. Summing them silently
-    # corrupts "reported" — surface the conflict instead and skip the check
-    # for that tag rather than report a diff computed from a bad number.
-    for parent_tag in summation_rules:
-        entries = amounts_by_tag.get(parent_tag, [])
-        if len(entries) > 1:
-            ids = ", ".join(str(id_) for id_, _ in entries)
-            structural_issues.append(StructuralIssue(
-                id=entries[0][0], tag=parent_tag,
-                issue=f"{len(entries)} items (ids: {ids}) mapped directly to summary tag "
-                      f"'{parent_tag}' — expected exactly one; summation check skipped for this tag",
-            ))
+    structural_issues = _check_structural_pool(request.mappings, candidate_tags, request.gics.name)
+    conflicted_tags, conflict_issues = _find_conflicted_tags(amounts_by_tag, summation_rules)
+    structural_issues += conflict_issues
 
-    summation_issues = []
-    for parent_tag, weighted_children in summation_rules.items():
-        if parent_tag not in amounts_by_tag or len(amounts_by_tag[parent_tag]) != 1:
-            continue
-        # (id, signed_amount) for every child tag actually assigned in this ledger.
-        # abs(amt): `amt` already carries the PDF's parenthesis-as-negative
-        # convention (parse_amount), which independently encodes "subtract this" —
-        # the same intent as a -1 calculation weight. Applying both double-flips
-        # the sign, so normalize to magnitude before the weight decides sign.
-        child_entries = [
-            (id_, weight * abs(amt))
-            for child_tag, weight in weighted_children
-            for id_, amt in amounts_by_tag.get(child_tag, [])
-        ]
-        if not child_entries:
-            continue  # no components assigned in this ledger — nothing to check
-
-        reported = sum(amt for _, amt in amounts_by_tag[parent_tag])
-        computed = sum(amt for _, amt in child_entries)
-        difference   = abs(reported - computed)
-        relative_gap = difference / abs(reported) if reported else float(computed != 0)
-
-        if relative_gap > SUM_TOLERANCE:
-            summation_issues.append(SummationIssue(
-                parentTag=parent_tag, reportedAmount=reported, computedAmount=computed,
-                difference=difference, childIds=[id_ for id_, _ in child_entries],
-            ))
+    summation_issues = _check_summations(amounts_by_tag, summation_rules, conflicted_tags)
 
     return LedgerResponse(
         passed=not structural_issues and not summation_issues,

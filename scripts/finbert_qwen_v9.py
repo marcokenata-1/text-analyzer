@@ -49,6 +49,14 @@ from d_20230318          import definition as gics_definition
 from ifrs_tags           import definition as ifrs_definition
 from universal_ifrs_tags import UNIVERSAL_TAGS
 
+# `ollama` and `build_graphdb` (rdflib/SPARQLWrapper) are NOT installed in
+# the Katana HPC environment (see module docstring's pip list) and aren't
+# needed there — only generate_disclosure_tags()/generate_sector_specific_
+# tags() below use them, and those are meant to be run locally/once to
+# produce the small cached JSON files the Katana mapper actually loads.
+# Imported lazily inside those two functions instead of at module level so
+# a normal Katana run of this script never touches either dependency.
+
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 BIENCODER_MODEL = "ProsusAI/finbert"
@@ -68,8 +76,28 @@ BIENCODER_TOPK  = 150
 QWEN_BATCH_SIZE = 50
 MAX_NEW_TOKENS  = 300
 
-# Hard blocklist — final safety net (from finbert_qwen_mapper.py, which
-# produced the precision v3_katana/v4_qwen are known for).
+# Disclosure-only tags (notes/breakdowns, never a standalone reported line
+# item) are NOT a hand-maintained list here — see generate_disclosure_tags()
+# below, which produces this file once (LLM-classified, then validated
+# against the calculation linkbase) and caches it; the mapper just loads it.
+DISCLOSURE_TAGS_FILE = "data/taxonomy/disclosure_tags.json"
+
+# Sector-specific tags (Oil & Gas/Mining tags leaking into unrelated
+# SubIndustries, banking/insurance tags leaking in via generic financial-
+# vocabulary overlap like "loans", "fair value", "credit") — an LLM-generate
+# + embedding-validate attempt at making this dynamic (generate_sector_
+# specific_tags() below) was tried and rejected: sampling its output found
+# real false positives (e.g. CurrentPortionOfLongtermBorrowings,
+# OtherFinanceIncomeCost, ProceedsFromIssuingOtherEquityInstruments —
+# generic tags any company could report, not bank-exclusive), and checking
+# the actual similarity margins confirmed embedding closeness to a sector's
+# GICS description measures "does this tag's wording resemble that sector's
+# vocabulary," not "would only that sector report this" — false and true
+# positives had overlapping margins (e.g. a false positive at 0.076 vs a
+# true positive at 0.079), so no threshold fixes it. Kept hand-maintained
+# until a better validation signal exists (e.g. cross-referencing empirical
+# tag usage across many companies' actual filings, once enough are on hand,
+# rather than embedding vocabulary resemblance alone).
 HARD_BLOCKLIST = [
     "CurrentPetroleumAndPetrochemicalProducts",
     "RevenueFromSaleOfPetroleumAndPetrochemicalProducts",
@@ -85,13 +113,6 @@ HARD_BLOCKLIST = [
 ]
 BLOCKLIST_EXEMPT = {"10", "15"}
 
-# Financial-institution-specific tags (banks/insurers) that leak into unrelated
-# SubIndustries because their labels share generic financial vocabulary
-# ("loans", "fair value", "credit") with FinBERT's bi-encoder shortlist — e.g.
-# LoansAndAdvancesToBanks/BrokerageFeeExpense showing up for Oil & Gas Drilling.
-# Substring match (not prefix/suffix) since these keywords appear mid-tag too,
-# e.g. "AdjustmentsForDecreaseIncreaseInLoansAndAdvancesToBanks". Exempt for
-# Financials (sector 40 — Banks/Diversified Financials/Insurance).
 FINANCIAL_INSTITUTION_KEYWORDS = [
     "LoansAndAdvances", "Brokerage", "CreditDerivative", "InsuranceFinance",
     "InsuranceContract", "Reinsurance", "DepositsFrom", "CentralBank",
@@ -102,6 +123,11 @@ FINANCIAL_SECTOR_EXEMPT = {"40"}
 
 def is_financial_institution_tag(tag: str) -> bool:
     return any(kw in tag for kw in FINANCIAL_INSTITUTION_KEYWORDS)
+
+
+def load_disclosure_tags() -> set:
+    with open(DISCLOSURE_TAGS_FILE) as f:
+        return set(json.load(f))
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -128,58 +154,6 @@ def build_subindustry_description(si_code: str) -> str:
             f"Industry: {industry_name}. "
             f"Sub-industry: {name}. "
             f"Description: {desc}")
-
-
-def is_disclosure_tag(tag: str) -> bool:
-    PREFIXES = [
-        "Retirements", "Disposals", "Additions", "Transfers",
-        "Settlements", "Reclassification", "PurchasesFairValue",
-        "FairValueOf", "FairValueGainsLosses", "MaximumExposureTo",
-        "DescriptionOf", "OtherCashPaymentsToAcquire",
-        "OtherCashReceiptsFromSales", "ProceedsFromGovernmentGrants",
-        "ProceedsFromOther", "ProceedsIncludedInProfitOrLoss",
-        "ProceedsFromDisposals", "ProceedsFromSalesOf",
-        "ProceedsFromSalesOr", "PurchaseOfOther",
-        "PurchaseOfExploration", "PurchaseOfInterests",
-        "PurchaseOfProperty", "PurchaseOfIntangible",
-        "MeasurementPeriod", "IncomeTaxRelatingToShare",
-        "IncomeTaxRelatingToInvestments",
-        "ShareOfOtherComprehensiveIncome", "ShareOfTotalComprehensive",
-        "OtherWorkPerformed", "IssueCostsNot",
-        "AcquisitionrelatedCosts", "AcquisitionsThroughBusinessCombinations",
-        "CustomerrelatedIntangible", "TechnologybasedIntangible",
-        "IntangibleAssetsAcquiredByWayOfGovernment",
-        "ContractualCommitmentsFor", "DecreaseThroughTransfer",
-        "PropertyPlantAndEquipmentCarrying",
-        "CashFlowsUsedInObtainingControl",
-        "CashPaymentsForFutureContracts", "CashReceiptsFromFutureContracts",
-        "CashReceiptsFromRepaymentOf", "CashAdvancesAndLoans",
-        "ParticipationIn", "CommitmentsFor", "RecognisedAssets",
-        "ReserveOfGains", "ProfitLossAttributableToParticipating",
-        "ProfitLossFromDiscontinuedOperations",
-        "DividendsRecognisedAsDistributions", "DividendsPaidToEquity",
-        "DividendsReceivedFrom", "FinancialAssetsReclassified",
-        "FinancialAssetsThatWere", "FinancialAssetsWhose",
-        "FinancialLiabilitiesThatWere", "SalesOfProperty",
-        "PurchasesOfProperty", "TransferFromTo",
-    ]
-    SUFFIXES = [
-        "FairValueHierarchy", "RelatedPartyTransaction",
-        "WherePriceQuotationsPublished",
-        "ThatAreNotDerecognisedInTheirEntirety",
-        "HedgingRelationshipsForWhichHedgeAccountingIsNoLongerApplied",
-        "InRelationToStructuredEntities",
-        "BeforeApplicationOfIFRS17",
-        "BeforeApplicationOfAmendmentsToIFRS9MadeByIFRS17",
-        "IncludingRightofuseAssets",
-    ]
-    for p in PREFIXES:
-        if tag.startswith(p):
-            return True
-    for s in SUFFIXES:
-        if tag.endswith(s):
-            return True
-    return False
 
 
 def parse_numbers(raw: str, max_n: int) -> list:
@@ -211,6 +185,175 @@ def apply_hard_blocklist(mapping: dict) -> dict:
     log(f"Hard blocklist removed {removed} domain-impossible tags")
     log(f"Financial-institution blocklist removed {fi_removed} bank/insurer-specific tags")
     return cleaned
+
+
+# ── Dynamic tag classification (generate once, cache to disk) ──────────────────
+#
+# generate_disclosure_tags() is NOT part of a normal Katana mapping run —
+# it's a separate, one-time (or "re-run when the taxonomy changes")
+# preprocessing step meant to be run locally, producing the small
+# DISCLOSURE_TAGS_FILE the actual mapper loads via load_disclosure_tags().
+# Requires `ollama` and this repo's data/taxonomy/ (for build_graphdb's
+# calculation linkbase parser) — neither is expected to be present on
+# Katana, hence the lazy imports.
+#
+# generate_sector_specific_tags() is kept below for its embedding-validation
+# approach and docstring explaining why it's NOT currently wired in (see the
+# HARD_BLOCKLIST/FINANCIAL_INSTITUTION_KEYWORDS comment above) — a starting
+# point if a better validation signal shows up later, not dead code to
+# resurrect blindly.
+
+def _ollama_classify_batch(prompt: str, ollama_model: str = "llama3.1") -> dict:
+    """Ask Ollama for a JSON object response, tolerating trailing prose."""
+    import ollama
+    try:
+        resp = ollama.chat(
+            model=ollama_model,
+            messages=[{"role": "user", "content": prompt}],
+            options={"temperature": 0.0},
+        )
+        raw = re.sub(r"^```(?:json)?|```$", "", resp["message"]["content"].strip(), flags=re.M).strip()
+        parsed, _ = json.JSONDecoder().raw_decode(raw)
+        return parsed
+    except Exception as e:
+        log(f"  [classify] batch failed, continuing: {e}")
+        return {}
+
+
+def generate_disclosure_tags(tags: list) -> set:
+    """
+    LLM-classifies each tag as a PRIMARY financial-statement line item or a
+    DISCLOSURE-only figure (notes: breakdowns, roll-forwards, related-party
+    detail, fair-value hierarchy levels, etc — never a top-level reported
+    total), batched.
+
+    Validated against the calculation linkbase (build_graphdb.load_
+    calculation_rules): any tag that participates in an official IFRS
+    summation rule is definitionally PRIMARY regardless of what the LLM
+    says — this overrides the LLM's classification instead of trusting its
+    judgment blindly, the same principle as build_chromadb.py's
+    validate_synonym_map. Concretely caught a real case during design: the
+    old hand-maintained list excluded every "ShareOfOtherComprehensiveIncome*"
+    tag as disclosure-only, but those tags are genuine calculation-linkbase
+    children of OtherComprehensiveIncome — a real bug this validation fixes.
+    """
+    from build_graphdb import load_calculation_rules
+    rules = load_calculation_rules()
+    calculation_tags = {p for p, _, _ in rules} | {c for _, c, _ in rules}
+
+    BATCH = 50
+    disclosure = set()
+    total_batches = (len(tags) - 1) // BATCH + 1
+    for i in range(0, len(tags), BATCH):
+        batch = tags[i:i + BATCH]
+        items = "\n".join(f"{n}. {camel_to_sentence(t)}" for n, t in enumerate(batch, 1))
+        prompt = f"""You are an IFRS financial reporting expert.
+
+For each numbered IFRS XBRL tag label below, classify it as either:
+  PRIMARY    — a figure that appears as a standalone line item on a
+               company's primary financial statements (balance sheet,
+               income statement, cash flow statement, equity statement)
+  DISCLOSURE — a figure that only appears in the notes to the financial
+               statements: breakdowns, roll-forwards, related-party
+               detail, fair-value hierarchy levels, maximum-exposure
+               disclosures, retirements/disposals/additions detail, etc.
+               Never a top-level reported total.
+
+{items}
+
+Reply with ONLY a JSON object mapping each number (as a string) to
+"PRIMARY" or "DISCLOSURE". No other text."""
+        result = _ollama_classify_batch(prompt)
+        for n, label in result.items():
+            try:
+                idx = int(n) - 1
+            except ValueError:
+                continue
+            if 0 <= idx < len(batch) and label == "DISCLOSURE":
+                disclosure.add(batch[idx])
+        log(f"  [disclosure classify] batch {i // BATCH + 1}/{total_batches}")
+
+    overridden = disclosure & calculation_tags
+    if overridden:
+        log(f"  [disclosure classify] overriding {len(overridden)} tags the LLM called "
+            f"DISCLOSURE but which participate in the calculation linkbase (definitionally PRIMARY)")
+    return disclosure - calculation_tags
+
+
+def generate_sector_specific_tags(tags: list, model) -> dict:
+    """
+    NOT CURRENTLY USED — see the HARD_BLOCKLIST/FINANCIAL_INSTITUTION_KEYWORDS
+    comment above for why. Kept as a documented, tested-and-rejected attempt
+    rather than deleted, since the approach (LLM classify + embedding
+    validate) is sound in principle, just not with this validation signal.
+
+    LLM-classifies which GICS Sector (if any) each tag is exclusive to,
+    batched. "Validated" by embedding: the tag's own label must sit closer
+    to its claimed sector's GICS description than to every other sector's —
+    the same principle as build_chromadb.py's validate_synonym_map, but it
+    doesn't hold up here: sampling the output found real false positives
+    (generic tags like CurrentPortionOfLongtermBorrowings and
+    OtherFinanceIncomeCost classified as Financials-exclusive), and their
+    similarity margins overlap with genuine true positives' margins (e.g. a
+    false positive at 0.076 vs a true positive at 0.079) — no threshold
+    separates them. This embedding check measures "does this tag's wording
+    resemble the claimed sector's vocabulary," which isn't the same
+    question as "would only that sector realistically report this," and
+    apparently can't be made to answer it just by tightening the cutoff.
+    """
+    import chromadb
+    sector_names = {code: d["name"] for code, d in gics_definition.items() if len(code) == 2}
+    client = chromadb.HttpClient(host="localhost", port=8001)
+    gics_docs = client.get_collection("gics_definitions").get(ids=list(sector_names), include=["documents"])
+    sector_codes = gics_docs["ids"]
+    sector_embs  = model.encode(gics_docs["documents"], normalize_embeddings=True)
+
+    options = "\n".join(f"  {c} = {n}" for c, n in sorted(sector_names.items()))
+
+    BATCH = 50
+    claims: dict = {}
+    total_batches = (len(tags) - 1) // BATCH + 1
+    for i in range(0, len(tags), BATCH):
+        batch = tags[i:i + BATCH]
+        items = "\n".join(f"{n}. {camel_to_sentence(t)}" for n, t in enumerate(batch, 1))
+        prompt = f"""You are an IFRS financial reporting expert.
+
+GICS Sectors:
+{options}
+
+For each numbered IFRS XBRL tag label below, name the GICS Sector code it
+is EXCLUSIVELY specific to — i.e. it would be nonsensical for a company
+outside that sector to report it (e.g. an oil drilling cost, a bank's
+customer deposits, an insurer's reinsurance premiums). Most tags apply
+broadly across industries — for those, answer "none".
+
+{items}
+
+Reply with ONLY a JSON object mapping each number (as a string) to a
+2-digit sector code or "none". No other text."""
+        result = _ollama_classify_batch(prompt)
+        for n, sector in result.items():
+            try:
+                idx = int(n) - 1
+            except ValueError:
+                continue
+            if 0 <= idx < len(batch) and sector in sector_names:
+                claims[batch[idx]] = sector
+        log(f"  [sector classify] batch {i // BATCH + 1}/{total_batches}")
+
+    log(f"  [sector classify] {len(claims)} tags claimed sector-specific, validating by embedding...")
+    tag_labels = [camel_to_sentence(t) for t in claims]
+    tag_embs   = model.encode(tag_labels, normalize_embeddings=True)
+    sims       = tag_embs @ sector_embs.T   # (n_claims, n_sectors)
+
+    validated = {}
+    for (tag, claimed_sector), row in zip(claims.items(), sims):
+        best_idx = int(row.argmax())
+        if sector_codes[best_idx] == claimed_sector:
+            validated[tag] = claimed_sector
+    log(f"  [sector classify] {len(validated)}/{len(claims)} claims validated "
+        f"(claimed sector was the tag's closest embedding match)")
+    return validated
 
 
 # ── Qwen3 resolver ─────────────────────────────────────────────────────────────
@@ -313,12 +456,13 @@ class FinBERTQwenMapper:
         log(f"Loading FinBERT ({BIENCODER_MODEL})...")
         self.biencoder = SentenceTransformer(BIENCODER_MODEL, device=device)
 
+        disclosure_tags = load_disclosure_tags()
         self.tag_keys   = []
         self.tag_labels = []
         for name in ifrs_definition:
             if name in UNIVERSAL_TAGS:
                 continue
-            if is_disclosure_tag(name):
+            if name in disclosure_tags:
                 continue
             self.tag_keys.append(name)
             self.tag_labels.append(camel_to_sentence(name))

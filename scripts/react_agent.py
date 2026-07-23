@@ -27,8 +27,12 @@ from sentence_transformers import util
 
 
 # ── Thresholds ────────────────────────────────────────────────────────────────
+#
+# Calibrated against BAAI/bge-base-en-v1.5 (api.py's MODEL_NAME) — its raw
+# distance/similarity distribution differs from whatever model is configured
+# there, so these need re-checking if that changes again.
 
-LOW_CONF_THRESHOLD = 0.55   # cosine distance above which TAOR triggers
+LOW_CONF_THRESHOLD = 0.23   # cosine distance above which TAOR triggers
 MAX_ITERATIONS     = 3      # TAOR cycle cap per item
 CONTEXT_WINDOW     = 3      # neighbours each side included in Thought step
 SUM_TOLERANCE      = 0.02   # 2 % relative tolerance for summation Observation
@@ -38,9 +42,9 @@ OLLAMA_MODEL       = "llama3.1"
 # (e.g. a tax disclosure sitting next to a PP&E note) — being nearby and
 # individually high-confidence isn't evidence the two items are topically
 # related. Anchors must also be semantically close to the item itself.
-# 0.35 cleanly separates real cases: unrelated pairs score ~0.11-0.20,
-# genuinely related ones ~0.73-0.95.
-ANCHOR_SIM_THRESHOLD = 0.35
+# 0.60 cleanly separates real cases under bge: unrelated pairs score up to
+# ~0.557, genuinely related ones from ~0.635 up.
+ANCHOR_SIM_THRESHOLD = 0.60
 
 TOTAL_PATTERN = re.compile(r"^(total|net\s+total|sub.?total)\b", re.I)
 
@@ -104,18 +108,14 @@ class ReActAgent:
             m = mapping_by_id.get(item.id)
 
             if m is None:
-                results.append(ReactResult(
-                    id=item.id, description=item.description, amount=item.amount or "",
-                    tag=None, tag_label=None, distance=None,
+                results.append(self._make_result(
+                    item, tag=None, label=None, dist=None,
                     resolved_by="unresolved", confidence="unresolved",
                 ))
-                continue
-
-            # High confidence — pass straight through
-            if m.distance is not None and m.distance < LOW_CONF_THRESHOLD:
-                results.append(ReactResult(
-                    id=item.id, description=item.description, amount=item.amount or "",
-                    tag=m.tag, tag_label=m.tagLabel, distance=m.distance,
+            elif m.distance is not None and m.distance < LOW_CONF_THRESHOLD:
+                # High confidence — pass straight through
+                results.append(self._make_result(
+                    item, tag=m.tag, label=m.tagLabel, dist=m.distance,
                     resolved_by="semantic_mapper", confidence="high",
                 ))
             else:
@@ -129,6 +129,17 @@ class ReActAgent:
                 ))
 
         return results
+
+    # ── Helper: result construction ───────────────────────────────────────────
+
+    @staticmethod
+    def _make_result(item, tag, label, dist, resolved_by, confidence, trace=None) -> ReactResult:
+        return ReactResult(
+            id=item.id, description=item.description, amount=item.amount or "",
+            tag=tag, tag_label=label, distance=dist,
+            resolved_by=resolved_by, confidence=confidence,
+            react_trace=trace or [],
+        )
 
     # ── TAOR loop ─────────────────────────────────────────────────────────────
 
@@ -187,10 +198,9 @@ class ReActAgent:
             if sum_winner:
                 tag, label, dist = sum_winner
                 trace.append(TaorStep("resolution", f"Summation check passed — accepted {tag}."))
-                return ReactResult(
-                    id=item.id, description=item.description, amount=item.amount or "",
-                    tag=tag, tag_label=label, distance=dist,
-                    resolved_by="react_loop", confidence="high", react_trace=trace,
+                return self._make_result(
+                    item, tag=tag, label=label, dist=dist,
+                    resolved_by="react_loop", confidence="high", trace=trace,
                 )
 
             if self.use_ollama:
@@ -200,10 +210,9 @@ class ReActAgent:
                     if matched:
                         tag, label, dist = matched
                         trace.append(TaorStep("resolution", f"Ollama resolved — accepted {tag}."))
-                        return ReactResult(
-                            id=item.id, description=item.description, amount=item.amount or "",
-                            tag=tag, tag_label=label, distance=dist,
-                            resolved_by="react_loop", confidence="low", react_trace=trace,
+                        return self._make_result(
+                            item, tag=tag, label=label, dist=dist,
+                            resolved_by="react_loop", confidence="low", trace=trace,
                         )
 
             # No improvement this iteration — update best candidate and loop
@@ -214,11 +223,10 @@ class ReActAgent:
                 f"No resolution in iteration {iteration + 1}. Best so far: {best_tag}.",
             ))
 
-        return ReactResult(
-            id=item.id, description=item.description, amount=item.amount or "",
-            tag=best_tag, tag_label=best_label, distance=best_dist,
+        return self._make_result(
+            item, tag=best_tag, label=best_label, dist=best_dist,
             resolved_by="react_loop" if best_tag != current_mapping.tag else "unresolved",
-            confidence="low", react_trace=trace,
+            confidence="low", trace=trace,
         )
 
     # ── Helper: context ───────────────────────────────────────────────────────

@@ -268,7 +268,7 @@ def parse_extractions(data: dict) -> tuple[Optional[str], list[dict]]:
     Parse extractions.json.
 
     Returns:
-        company_name — auto-detected via three-tier heuristic (see extract_company_name)
+        company_name — auto-detected via four-tier heuristic (see extract_company_name)
         items        — flat list of {id, description, amount} dicts
     """
     items: list[dict] = []

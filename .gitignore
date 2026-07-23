@@ -1,7 +1,6 @@
 __pycache__
 .env
 .DS_Store
-data/chromadb/
-data/chroma_db/
-data/mappings/
+data/
 logs/
+*.zip
