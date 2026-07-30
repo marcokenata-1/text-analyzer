@@ -142,17 +142,28 @@ in `data/mappings/extractions*.json`.
 
 ```
 scripts/
-  api.py                  Full FastAPI service (UC2+UC3+UC4)
-  knowledge_api.py         Lightweight /classify-only service
-  react_agent.py            ReAct/TAOR loop for low-confidence tag resolution
-  parse_extraction.py       Layer 1 extraction JSON -> line items
-  build_graphdb.py          Loads GICS/IFRS knowledge graph into GraphDB
-  build_chromadb.py         Embeds tag labels + GICS definitions into ChromaDB
-  finbert_qwen_v9.py         Katana HPC batch mapper (FinBERT + Qwen3-14B) —
-                             regenerates subindustry_ifrs_mapping_v9.json
-  run_v9.pbs                 PBS job script for the above (UNSW Katana HPC)
+  api.py                     Full FastAPI service (UC2+UC3+UC4)
+  knowledge_api.py           Lightweight /classify-only service
+  react_agent.py             ReAct/TAOR loop for low-confidence tag resolution
+  parse_extraction.py        Layer 1 extraction JSON -> line items
+  build_graphdb.py           Loads GICS/IFRS knowledge graph into GraphDB
+  build_chromadb.py          Embeds tag labels + GICS definitions into ChromaDB
+  verify_graphdb.py          Standalone diagnostic — sanity-checks a loaded graph
+  test_react_resolve_order.py
+                              Sanity check for react_agent.py's concurrent resolve()
+  katana/
+    finbert_qwen_v9.py         Katana HPC batch mapper (FinBERT + Qwen3-14B) —
+                                regenerates subindustry_ifrs_mapping_v9.json
+    run_v9.pbs                 PBS job script for the above (UNSW Katana HPC)
   d_20230318.py, ifrs_tags.py, universal_ifrs_tags.py
-                             Static GICS/IFRS taxonomy definitions
+                              Static GICS/IFRS taxonomy definitions
+  Dockerfile.api              Builds the api.py image
+  Dockerfile.knowledge-api    Builds the knowledge_api.py image
+  requirements-api.txt, requirements-knowledge-api.txt
+                              Per-image pip dependencies
+  archive/                    Superseded/legacy scripts (old Neo4j-era code, prior
+                               mapper versions) — gitignored, kept locally only,
+                               not part of the running pipeline
 
 data/                      Not committed — see "Generating the data" below
   mappings/                SubIndustry->XBRL tag mapping files, extraction fixtures
@@ -164,6 +175,48 @@ logs/                       Not committed — saved /reason + /validate output
                              pipeline (see Quick start)
 docs/                       Research report
 ```
+
+### File dependencies
+
+Static taxonomy data — no local imports, the base layer everything else
+reads from:
+- `d_20230318.py` — GICS Sector/IndustryGroup/Industry/SubIndustry hierarchy
+- `ifrs_tags.py` — the ~2,300 XBRL tag definitions
+- `universal_ifrs_tags.py` — the ~55 tags applied to every sub-industry
+
+Pipeline / offline scripts:
+- `build_graphdb.py` imports `d_20230318.py`, `ifrs_tags.py`,
+  `universal_ifrs_tags.py` — also reads `data/taxonomy/` directly (falls
+  back to reading straight out of `IFRSAT-2025.zip` if the flat files
+  under `data/taxonomy/` aren't present, so a fresh setup doesn't strictly
+  need the manual extraction step below).
+- `build_chromadb.py` imports `d_20230318.py`, `ifrs_tags.py`, and
+  `build_graphdb.py` itself (reuses its label-loading + camelCase-to-
+  sentence helpers rather than duplicating them).
+- `verify_graphdb.py` imports `universal_ifrs_tags.py` — run manually
+  after `build_graphdb.py` to sanity-check what actually loaded.
+- `katana/finbert_qwen_v9.py` imports `d_20230318.py`, `ifrs_tags.py`,
+  `universal_ifrs_tags.py` — these live one level up in `scripts/`, not
+  alongside it, so it isn't self-contained: deploying to the HPC cluster
+  means `scp`-ing all three together with it and `run_v9.pbs` (see
+  "Regenerating a SubIndustry→tag mapping" below). Not imported by
+  anything else in this repo.
+
+Services:
+- `api.py` imports `parse_extraction.py` and `react_agent.py` — packaged
+  by `Dockerfile.api` together with those two files.
+- `knowledge_api.py` imports `d_20230318.py` — packaged by
+  `Dockerfile.knowledge-api` together with it.
+- `parse_extraction.py` and `react_agent.py` have no local imports of
+  their own (only third-party: `requests`; `ollama` + `sentence-transformers`).
+
+Tests:
+- `test_react_resolve_order.py` imports `react_agent.py` — run directly
+  (`python3 scripts/test_react_resolve_order.py`), no server/fixtures needed.
+
+**Setup order** follows the dependency chain: taxonomy files on disk (or
+`IFRSAT-2025.zip`) → `build_graphdb.py` → optionally `verify_graphdb.py`
+→ `build_chromadb.py` → `api.py` / `knowledge_api.py` can now start.
 
 ## Generating the data
 
@@ -180,12 +233,19 @@ instead of using a hand-maintained rule list):
    [IFRS Accounting Taxonomy page](https://www.ifrs.org/issued-standards/ifrs-taxonomy/)
    (free registration required) — the full package includes every
    standard's calculation linkbase, not just IAS 1/IAS 7.
-2. From the zip's `full_ifrs/` folder, copy `full_ifrs-cor_*.xsd` and
-   `labels/lab_full_ifrs-en_*.xml` to `data/taxonomy/`, and the entire
-   `linkbases/` folder to `data/taxonomy/linkbases/` (all standards, not
-   a subset — `load_calculation_rules()` only reads the `cal_*.xml` files
-   within it, but the full linkbase tree is still the actual official
-   source of truth to keep on hand).
+2. **Either** extract it: copy `full_ifrs-cor_*.xsd` and
+   `labels/lab_full_ifrs-en_*.xml` from the zip's `full_ifrs/` folder to
+   `data/taxonomy/`, and the entire `linkbases/` folder to
+   `data/taxonomy/linkbases/` (all standards, not a subset —
+   `load_calculation_rules()` only reads the `cal_*.xml` files within it,
+   but the full linkbase tree is still the actual official source of
+   truth to keep on hand) — **or** just drop the zip itself, unextracted,
+   at the repo root as `IFRSAT-2025.zip`. `build_graphdb.py` checks for
+   the flat extracted files first and falls back to reading straight out
+   of the zip if they're missing, so the zip alone is enough to get
+   running (useful for a fresh VM/clone where you don't want to bother
+   reorganizing paths by hand) — extracting is only worth it if you want
+   the flat files individually browsable on disk.
 3. Rerun `build_graphdb.main()` to reload GraphDB with the updated rules.
 4. If the new taxonomy adds/renames tags, `scripts/ifrs_tags.py` (the
    static tag definition dict) needs regenerating too — not automated
@@ -212,7 +272,7 @@ GraphDB production default) and **`data/mappings/extractions*.json`**
 (the separate `TableExtractor` repo) respectively; no script in this repo
 regenerates them from scratch. If you don't have copies, you'll need a
 SubIndustry→tag mapping and at least one extraction JSON to get started —
-see `finbert_qwen_v9.py` below for a way to produce a fresh mapping.
+see `katana/finbert_qwen_v9.py` below for a way to produce a fresh mapping.
 
 **`data/mappings/subindustry_ifrs_mapping_v9.json`** (and any newer
 mapping version) — regenerate via the Katana HPC batch mapper, see
@@ -227,12 +287,17 @@ extraction fixtures (step 4 above) and saving the responses.
 
 ## Regenerating a SubIndustry→tag mapping (Katana HPC)
 
-`finbert_qwen_v9.py` is a two-stage mapper: FinBERT bi-encoder shortlists
-candidate tags per GICS SubIndustry, then Qwen3-14B selects the ones that
-are actually relevant. To rerun it on UNSW's Katana HPC:
+`katana/finbert_qwen_v9.py` is a two-stage mapper: FinBERT bi-encoder
+shortlists candidate tags per GICS SubIndustry, then Qwen3-14B selects the
+ones that are actually relevant. It imports `d_20230318.py`, `ifrs_tags.py`,
+and `universal_ifrs_tags.py` from one level up in `scripts/`, so all three
+need to go along with it — it isn't runnable from just its own folder. To
+rerun it on UNSW's Katana HPC:
 
 ```bash
-scp finbert_qwen_v9.py run_v9.pbs katana:~/thesis/
+scp scripts/d_20230318.py scripts/ifrs_tags.py scripts/universal_ifrs_tags.py \
+    scripts/katana/finbert_qwen_v9.py scripts/katana/run_v9.pbs \
+    katana:~/thesis/
 ssh katana
 qsub run_v9.pbs
 ```

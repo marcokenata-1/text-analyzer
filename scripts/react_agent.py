@@ -342,6 +342,25 @@ class ReActAgent:
 
     # ── Helper: Ollama resolution ─────────────────────────────────────────────
 
+    # A small 8B model reasons worse, not better, when handed multiple
+    # unconditional disambiguation rules at once — asking the (irrelevant)
+    # asset-vs-liability direction question about a profit-hierarchy line
+    # visibly derails it into shallow pattern-matching on the top-ranked
+    # candidate before it ever reaches the rule that actually applies
+    # (verified: same context, only the direction question added, flips a
+    # correct answer to wrong). Profit-hierarchy tags are never
+    # assets/liabilities, so the two rules can't both be relevant to the
+    # same item — mutually exclusive, direction check is the default since
+    # that's the more common case (most line items aren't profit-hierarchy
+    # totals) and matches prior behaviour for everything except the profit
+    # case this was found to break.
+    _PROFIT_STAGE_TAGS = {
+        "GrossProfit", "ProfitLossFromOperatingActivities",
+        "ProfitLossFromContinuingOperations", "ProfitLossBeforeTax",
+        "ProfitLoss", "ProfitLossAttributableToOwnersOfParent",
+        "ProfitLossAttributableToNoncontrollingInterests",
+    }
+
     def _ollama_resolve(self, item, candidates, anchors, mapping_by_id) -> Optional[str]:
         """
         Ask Ollama to pick the best candidate tag given surrounding context.
@@ -358,6 +377,42 @@ class ReActAgent:
             for i, (tag, label, _) in enumerate(candidates)
         )
 
+        tag_names = {c[0] for c in candidates}
+        is_profit_case = len(tag_names & self._PROFIT_STAGE_TAGS) >= 2
+        rules = []
+
+        if not is_profit_case:
+            rules.append(
+                'In one sentence: does this line item represent money OWED BY the '
+                'entity (a liability/expense) or OWED TO the entity (an asset/income)? '
+                'Tag names containing "Liabilities" or "Payable" are the entity\'s '
+                'obligations; "Assets" or "Receivable" are amounts due to the entity — '
+                'embedding similarity alone often can\'t tell these apart for short '
+                'tax/duty labels, so reason about it explicitly. Then pick the '
+                'candidate consistent with that direction.'
+            )
+
+        if is_profit_case:
+            rules.append(
+                'The candidates span more than one stage of the profit hierarchy — '
+                'these are NOT interchangeable even when their labels sound similar: '
+                '"gross profit" -> GrossProfit; "operating profit" -> '
+                'ProfitLossFromOperatingActivities or ProfitLossFromContinuingOperations; '
+                '"profit before tax" / "before zakat and income tax" -> '
+                'ProfitLossBeforeTax; and the FINAL bottom-line figure — "net profit", '
+                '"profit for the year"/"for the period" — is the plain tag named '
+                'exactly ProfitLoss. Its own taxonomy label is just "Profit (loss)", '
+                'deceptively generic-sounding — do not let that push you toward a '
+                'more specific-sounding but WRONG decoy like '
+                'ProfitLossFromContinuingOperations or ProfitLossBeforeTax; match the '
+                'item\'s own wording ("net profit", "for the year") to which STAGE it '
+                'names, not to which candidate\'s label reads as more detailed. '
+                'Likewise match "current" vs "non-current" literally to the item\'s '
+                'own wording, not to whichever candidate scored higher.'
+            )
+
+        rules_block = "\n\n".join(f"{i + 1}. {r}" for i, r in enumerate(rules))
+
         prompt = f"""You are an IFRS financial reporting expert.
 
 Line item: "{item.description}"  amount: {item.amount}
@@ -368,12 +423,7 @@ High-confidence neighbouring items (for accounting context):
 Candidate XBRL tags (ranked by embedding similarity):
 {cand_lines}
 
-First, in one sentence: does this line item represent money OWED BY the
-entity (a liability/expense) or OWED TO the entity (an asset/income)? Tag
-names containing "Liabilities" or "Payable" are the entity's obligations;
-"Assets" or "Receivable" are amounts due to the entity — embedding similarity
-alone often can't tell these apart for short tax/duty labels, so reason about
-it explicitly. Then pick the candidate consistent with that direction.
+{rules_block}
 
 Reply with your one-sentence reasoning, then on a new line write exactly:
 ANSWER: <number>
