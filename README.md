@@ -191,6 +191,19 @@ instead of using a hand-maintained rule list):
    static tag definition dict) needs regenerating too — not automated
    yet, would need to be parsed from the new `full_ifrs-cor_*.xsd`.
 
+**`scripts/d_20230318.py`** — GICS Sector/IndustryGroup/Industry/
+SubIndustry codes, names, and descriptions. Unlike the IFRS taxonomy,
+MSCI/S&P Dow Jones Indices (who jointly maintain GICS) don't publish it
+as a structured, machine-readable package — just PDF methodology/
+structure documents, periodically revised. This file was generated via
+the [`gics`](https://github.com/dorklein/py-gics) Python package
+(`pip install gics`), whose bundled data versions are named after their
+GICS effective date — `20230318` is that package's default version and
+matches this file's name. Updating to a newer GICS revision means
+checking whether `py-gics` has added a newer version, or otherwise
+transcribing the new MSCI GICS Methodology PDF by hand — there's no
+XML-parsing equivalent to `load_calculation_rules()` available here.
+
 To reproduce the rest from a fresh clone:
 
 **`data/mappings/subindustry_ifrs_mapping_v3_katana.json`** (the current

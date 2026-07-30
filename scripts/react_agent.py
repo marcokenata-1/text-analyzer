@@ -19,6 +19,7 @@ reasoning path is inspectable (§2.4.1 non-functional requirement).
 """
 
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -37,6 +38,7 @@ MAX_ITERATIONS     = 3      # TAOR cycle cap per item
 CONTEXT_WINDOW     = 3      # neighbours each side included in Thought step
 SUM_TOLERANCE      = 0.02   # 2 % relative tolerance for summation Observation
 OLLAMA_MODEL       = "llama3.1"
+RESOLVE_WORKERS    = 4       # concurrent item resolutions (bounded by Ollama's own concurrency, not just CPU count)
 
 # Physically-adjacent rows in the source table are often from unrelated notes
 # (e.g. a tax disclosure sitting next to a PP&E note) — being nearby and
@@ -103,32 +105,33 @@ class ReActAgent:
         item_by_id    = {it.id: it for it in items}
         id_order      = [it.id for it in items]
 
-        results = []
-        for item in items:
+        # mapping_by_id is only ever read here, never written — each item's
+        # TAOR loop (below) is independent of every other item's outcome, so
+        # they're safe to run concurrently. Bounded by RESOLVE_WORKERS since
+        # each low-confidence item makes a blocking Ollama call.
+        def _resolve_one(item):
             m = mapping_by_id.get(item.id)
-
             if m is None:
-                results.append(self._make_result(
+                return self._make_result(
                     item, tag=None, label=None, dist=None,
                     resolved_by="unresolved", confidence="unresolved",
-                ))
-            elif m.distance is not None and m.distance < LOW_CONF_THRESHOLD:
-                # High confidence — pass straight through
-                results.append(self._make_result(
+                )
+            if m.distance is not None and m.distance < LOW_CONF_THRESHOLD:
+                return self._make_result(
                     item, tag=m.tag, label=m.tagLabel, dist=m.distance,
                     resolved_by="semantic_mapper", confidence="high",
-                ))
-            else:
-                results.append(self._run_taor(
-                    item=item,
-                    current_mapping=m,
-                    id_order=id_order,
-                    item_by_id=item_by_id,
-                    mapping_by_id=mapping_by_id,
-                    candidate_tags=candidate_tags,
-                ))
+                )
+            return self._run_taor(
+                item=item,
+                current_mapping=m,
+                id_order=id_order,
+                item_by_id=item_by_id,
+                mapping_by_id=mapping_by_id,
+                candidate_tags=candidate_tags,
+            )
 
-        return results
+        with ThreadPoolExecutor(max_workers=RESOLVE_WORKERS) as pool:
+            return list(pool.map(_resolve_one, items))
 
     # ── Helper: result construction ───────────────────────────────────────────
 

@@ -24,11 +24,14 @@ Setup:
     Repository 'ifrs-gics' is auto-created if missing
 """
 
+import fnmatch
 import glob
+import io
 import json
 import re
 import requests
 import xml.etree.ElementTree as ET
+import zipfile
 from rdflib import Graph, Namespace, URIRef, Literal, RDF, RDFS, XSD
 from SPARQLWrapper import SPARQLWrapper, JSON
 
@@ -44,6 +47,24 @@ SPARQL_URL   = f"{GRAPHDB_URL}/repositories/{REPOSITORY}"
 UPDATE_URL   = f"{GRAPHDB_URL}/repositories/{REPOSITORY}/statements"
 
 INPUT_JSON   = "data/mappings/subindustry_ifrs_mapping_v3_katana.json"
+
+# Official IFRS Accounting Taxonomy package (xbrl.ifrs.org), used as a
+# fallback source for the two functions below when data/taxonomy/ hasn't
+# been extracted/flattened by hand — reads straight out of the zip instead.
+TAXONOMY_ZIP = "IFRSAT-2025.zip"
+
+
+def _taxonomy_files(flat_glob: str, zip_glob: str):
+    """Yield readable file objects matching flat_glob under data/taxonomy/,
+    or — if none are found there — matching zip_glob inside TAXONOMY_ZIP."""
+    paths = sorted(glob.glob(flat_glob))
+    if paths:
+        for path in paths:
+            yield open(path, "rb")
+        return
+    with zipfile.ZipFile(TAXONOMY_ZIP) as zf:
+        for name in sorted(n for n in zf.namelist() if fnmatch.fnmatch(n, zip_glob)):
+            yield io.BytesIO(zf.read(name))
 
 REPO_CONFIG_TTL = f"""
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
@@ -109,8 +130,11 @@ def load_calculation_rules() -> list[tuple[str, str, float]]:
     }
     rules: set[tuple[str, str, float]] = set()
 
-    for path in sorted(glob.glob("data/taxonomy/linkbases/*/cal_*.xml")):
-        root = ET.parse(path).getroot()
+    for f in _taxonomy_files(
+        "data/taxonomy/linkbases/*/cal_*.xml",
+        "IFRSAT-2025/full_ifrs/linkbases/*/cal_*.xml",
+    ):
+        root = ET.parse(f).getroot()
         label_to_tag = {}
         for loc in root.findall(".//link:loc", ns):
             href = loc.get(f"{{{ns['xlink']}}}href", "")
@@ -138,8 +162,11 @@ def camel_to_sentence(name: str) -> str:
 
 def load_ifrs_labels() -> dict:
     label_map = {}
-    tree = ET.parse("data/taxonomy/lab_full_ifrs-en_2025-03-27.xml")
-    root = tree.getroot()
+    f = next(_taxonomy_files(
+        "data/taxonomy/lab_full_ifrs-en_2025-03-27.xml",
+        "IFRSAT-2025/full_ifrs/labels/lab_full_ifrs-en_2025-03-27.xml",
+    ))
+    root = ET.parse(f).getroot()
     ns   = {"link": "http://www.xbrl.org/2003/linkbase"}
     for label in root.findall(".//link:label", ns):
         id_attr = label.get("id", "")
