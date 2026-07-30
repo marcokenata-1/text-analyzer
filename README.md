@@ -222,7 +222,12 @@ Tests:
 
 All of `data/` and `logs/` are gitignored — none of it is source, all of
 it is either regenerable pipeline output or external reference data with
-a documented way to obtain it.
+a documented way to obtain it. Two files are a deliberate, force-added
+exception to that (`git add -f`): `data/mappings/subindustry_ifrs_mapping_v3_katana.json`
+(the GraphDB production default, otherwise irreplaceable — see below) and
+`subindustry_ifrs_mapping_v9.json` (its regenerable but slow-to-reproduce
+successor). They're tracked so a fresh clone (e.g. a new deployment host)
+has what `build_graphdb.py` needs without a separate manual transfer step.
 
 **`data/taxonomy/`** — the official IFRS Accounting Taxonomy package
 (`full_ifrs-cor_*.xsd`, `lab_full_ifrs-en_*.xml`, and the `linkbases/`
@@ -266,17 +271,20 @@ XML-parsing equivalent to `load_calculation_rules()` available here.
 
 To reproduce the rest from a fresh clone:
 
-**`data/mappings/subindustry_ifrs_mapping_v3_katana.json`** (the current
-GraphDB production default) and **`data/mappings/extractions*.json`**
-(Layer 1 test fixtures) — these came from earlier pipeline runs and Layer 1
-(the separate `TableExtractor` repo) respectively; no script in this repo
-regenerates them from scratch. If you don't have copies, you'll need a
-SubIndustry→tag mapping and at least one extraction JSON to get started —
-see `katana/finbert_qwen_v9.py` below for a way to produce a fresh mapping.
+**`data/mappings/subindustry_ifrs_mapping_v3_katana.json`** — tracked in
+git (see above), no action needed. It came from an earlier Katana pipeline
+run; no script in this repo regenerates it from scratch, which is exactly
+why it's committed rather than left gitignored like the rest of `data/`.
 
-**`data/mappings/subindustry_ifrs_mapping_v9.json`** (and any newer
-mapping version) — regenerate via the Katana HPC batch mapper, see
-"Regenerating a SubIndustry→tag mapping" below.
+**`data/mappings/extractions*.json`** (Layer 1 test fixtures) — these came
+from Layer 1 (the separate `TableExtractor` repo) and aren't committed. If
+you don't have copies, you'll need at least one extraction JSON to test
+`/classify-extraction` or `/reason`.
+
+**`data/mappings/subindustry_ifrs_mapping_v9.json`** — also tracked in
+git for convenience, but unlike `v3_katana.json` it's fully reproducible:
+regenerate via the Katana HPC batch mapper, see "Regenerating a
+SubIndustry→tag mapping" below.
 
 **`data/chromadb/`, `data/chroma_db/`** — regenerate via `build_chromadb.py`
 (step 3 above); this is pure derived state from `data/mappings/` and the
