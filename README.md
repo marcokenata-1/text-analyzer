@@ -142,8 +142,14 @@ in `data/mappings/extractions*.json`.
 
 ```
 scripts/
-  api.py                     Full FastAPI service (UC2+UC3+UC4)
-  knowledge_api.py           Lightweight /classify-only service
+  api.py                     Full FastAPI service (UC2+UC3+UC4) — thin routing layer;
+                              logic lives in the four modules below
+  schemas.py                  Request/response models (Pydantic)
+  gics.py                     GICS sub-industry classification (UC2 Identity Mapping)
+  graphdb_client.py           SPARQL access — candidate tags, summation rules
+  validation.py                UC4 checks (Structural Contextualizer, Summation Check)
+  knowledge_api.py           Lightweight /classify-only service — a separate, simpler
+                              standalone GICS implementation, not sharing gics.py
   react_agent.py             ReAct/TAOR loop for low-confidence tag resolution
   parse_extraction.py        Layer 1 extraction JSON -> line items
   build_graphdb.py           Loads GICS/IFRS knowledge graph into GraphDB
@@ -203,12 +209,17 @@ Pipeline / offline scripts:
   anything else in this repo.
 
 Services:
-- `api.py` imports `parse_extraction.py` and `react_agent.py` — packaged
-  by `Dockerfile.api` together with those two files.
+- `api.py` imports `schemas.py`, `gics.py`, `graphdb_client.py`,
+  `validation.py`, `parse_extraction.py`, and `react_agent.py` — packaged
+  by `Dockerfile.api` together with all of them. `validation.py` in turn
+  imports `schemas.py` for its issue types.
 - `knowledge_api.py` imports `d_20230318.py` — packaged by
-  `Dockerfile.knowledge-api` together with it.
-- `parse_extraction.py` and `react_agent.py` have no local imports of
-  their own (only third-party: `requests`; `ollama` + `sentence-transformers`).
+  `Dockerfile.knowledge-api` together with it. It has its own standalone
+  GICS classification (string concatenation, no company-weight blending)
+  rather than importing `gics.py` — deliberately simpler, see `gics.py`'s
+  module docstring.
+- `schemas.py`, `gics.py`, `graphdb_client.py`, `parse_extraction.py`, and
+  `react_agent.py` have no local imports of their own.
 
 Tests:
 - `test_react_resolve_order.py` imports `react_agent.py` — run directly

@@ -1,5 +1,5 @@
 """
-IFRS Accounting Taxonomy 2025 — monetary data point tags with labels.
+IFRS Accounting Taxonomy 2025: monetary data point tags with labels.
 Sources:
   XSD:    https://xbrl.ifrs.org/taxonomy/2025-03-27/full_ifrs/full_ifrs-cor_2025-03-27.xsd
   Labels: https://xbrl.ifrs.org/taxonomy/2025-03-27/full_ifrs/labels/lab_full_ifrs-en_2025-03-27.xml

@@ -1,5 +1,5 @@
 """
-Sanity check for the concurrent resolve() in react_agent.py — proves
+Sanity check for the concurrent resolve() in react_agent.py. Proves
 results come back in input order even when the (slow) low-confidence
 items finish out of order, and that no exception escapes the pool.
 
@@ -17,7 +17,7 @@ def demo():
     agent = ReActAgent(model=None, xbrl_collection=None)
 
     # Item 1 is high-confidence (skips TAOR); items 2-5 are low-confidence
-    # and would enter _run_taor — stub it with a random sleep so completion
+    # and would enter _run_taor. Stub it with a random sleep so completion
     # order is scrambled, then assert output order still matches input order.
     def fake_run_taor(item, current_mapping, id_order, item_by_id, mapping_by_id, candidate_tags):
         time.sleep(random.uniform(0.01, 0.05))
@@ -38,7 +38,7 @@ def demo():
     assert [r.id for r in results] == [1, 2, 3, 4, 5], f"order broken: {[r.id for r in results]}"
     assert results[0].resolved_by == "semantic_mapper"
     assert all(r.resolved_by == "react_loop" for r in results[1:])
-    print("OK — concurrent resolve() preserves input order:", [r.id for r in results])
+    print("OK, concurrent resolve() preserves input order:", [r.id for r in results])
 
 
 if __name__ == "__main__":

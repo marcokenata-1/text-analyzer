@@ -1,16 +1,14 @@
 """
-Knowledge Layer service — UC2 only.
+Knowledge Layer service: UC2 only.
 
-Per the research report, Sec 3.5.1: Identity Mapping (company -> GICS) and
-Contextual Pruning (narrow the XBRL taxonomy to the identified
-sub-industry's relevant tags), backed entirely by the GraphDB knowledge
-graph. Returns the pruned candidate XBRL tags for a sub-industry — no
-per-item tag assignment, that's the Semantic Mapper's job (UC3, Sec 3.5.3),
-which belongs to the Reasoning Layer endpoint, not this one.
+Identity Mapping (company -> GICS) and Contextual Pruning (narrow the XBRL
+taxonomy to the identified sub-industry's relevant tags), backed entirely by
+GraphDB. Returns the pruned candidate XBRL tags for a sub-industry; there's
+no per-item tag assignment here, that's the Semantic Mapper's job in the
+Reasoning Layer (UC3, see api.py's /reason).
 
-UC2 and UC3 are separate endpoints (see scripts/api.py's /classify vs
-/reason) — this container only ever needs to do UC2, so its only runtime
-dependency is GraphDB. No ChromaDB, no Ollama.
+This is a lighter deployment of UC2 than api.py's /classify: its only
+runtime dependency is GraphDB, no ChromaDB or Ollama needed.
 
 Run:
     PYTHONPATH=scripts uvicorn knowledge_api:app --reload --port 8000
@@ -37,7 +35,6 @@ SPARQL_URL   = f"{GRAPHDB_URL}/repositories/{REPOSITORY}"
 MODEL_NAME   = "BAAI/bge-base-en-v1.5"
 
 GICS_LEVELS  = [2, 4, 6, 8]
-LEVEL_NAMES  = {2: "Sector", 4: "IndustryGroup", 6: "Industry", 8: "SubIndustry"}
 BOILERPLATE  = re.compile(r"^(total|other|net)\b", re.I)
 
 PREFIXES = """
@@ -69,12 +66,12 @@ class GicsResult(BaseModel):
 
 
 class KnowledgeResponse(BaseModel):
-    """UC2 — Knowledge Layer: GICS identification + pruned candidate tags, no per-item assignment."""
+    """UC2, Knowledge Layer: GICS identification + pruned candidate tags, no per-item assignment."""
     gics: GicsResult
     candidateTags: list[str]
 
 
-app = FastAPI(title="Knowledge Layer — /classify (UC2 only)")
+app = FastAPI(title="Knowledge Layer (/classify, UC2 only)")
 
 _model         = None
 _gics_by_level = None   # {level: (ids, embeddings, names)}
@@ -183,13 +180,11 @@ def health():
 @app.post("/classify", response_model=KnowledgeResponse)
 def classify(request: ClassifyRequest):
     """
-    UC2 — Knowledge Layer only. Identifies the GICS sub-industry and returns
-    the pruned candidate XBRL tags for it — no per-item tag assignment (that's
-    the Semantic Mapper's job, part of the UC3 Reasoning Layer endpoint).
-
-    If companyName is provided, fetches a business description online
-    (DuckDuckGo / Wikipedia) and uses it as a strong prior for GICS
-    inference before falling back to the line-item signal.
+    UC2, Knowledge Layer only. Identifies the GICS sub-industry and returns
+    its pruned candidate XBRL tags (no per-item assignment; that's the
+    Semantic Mapper's job in UC3). If companyName is given, an online
+    business-description lookup is used as a prior for GICS inference
+    alongside the line-item signal.
     """
     items     = request.items
     described = [it for it in items if it.description.strip()]

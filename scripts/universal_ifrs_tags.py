@@ -1,5 +1,5 @@
 """
-Universal IFRS tags — verified against IFRS taxonomy 2025-03-27.
+Universal IFRS tags, verified against IFRS taxonomy 2025-03-27.
 
 These are the core line items required by IAS 1 (Presentation of Financial
 Statements) and IAS 7 (Cash Flow Statements) that every company regardless

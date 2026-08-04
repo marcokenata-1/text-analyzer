@@ -1,10 +1,10 @@
 """
 GraphDB Knowledge Graph Builder
 
-Replaces Neo4j entirely — loads IFRS-GICS knowledge graph into
-Ontotext GraphDB using RDF triples and SPARQL.
+Loads the IFRS-GICS knowledge graph into Ontotext GraphDB as RDF triples,
+queryable via SPARQL.
 
-Graph structure (matches KG diagram):
+Graph structure:
     gics:Sector -[kg:PARENT_OF]-> gics:IndustryGroup
     gics:IndustryGroup -[kg:PARENT_OF]-> gics:Industry
     gics:Industry -[kg:PARENT_OF]-> gics:SubIndustry
@@ -15,7 +15,7 @@ Graph structure (matches KG diagram):
 SubIndustry → XBRL tag mapping is read directly from
 data/mappings/subindustry_ifrs_mapping_v3_katana.json (already computed
 on Katana HPC via the two-stage FinBERT + Qwen3 mapper). This script does
-not recompute the mapping — it only loads it, plus the universal tags,
+not recompute the mapping; it only loads it, plus the universal tags,
 into GraphDB.
 
 Setup:
@@ -32,7 +32,7 @@ import re
 import requests
 import xml.etree.ElementTree as ET
 import zipfile
-from rdflib import Graph, Namespace, URIRef, Literal, RDF, RDFS, XSD
+from rdflib import Graph, Namespace, Literal, RDF, RDFS, XSD
 from SPARQLWrapper import SPARQLWrapper, JSON
 
 from d_20230318          import definition as gics_definition
@@ -40,7 +40,6 @@ from ifrs_tags           import definition as ifrs_definition
 from universal_ifrs_tags import UNIVERSAL_TAGS
 
 
-# ── Config ─────────────────────────────────────────────────────────────────────
 GRAPHDB_URL  = "http://localhost:7200"
 REPOSITORY   = "ifrs-gics"
 SPARQL_URL   = f"{GRAPHDB_URL}/repositories/{REPOSITORY}"
@@ -50,13 +49,13 @@ INPUT_JSON   = "data/mappings/subindustry_ifrs_mapping_v3_katana.json"
 
 # Official IFRS Accounting Taxonomy package (xbrl.ifrs.org), used as a
 # fallback source for the two functions below when data/taxonomy/ hasn't
-# been extracted/flattened by hand — reads straight out of the zip instead.
+# been extracted/flattened by hand; reads straight out of the zip instead.
 TAXONOMY_ZIP = "IFRSAT-2025.zip"
 
 
 def _taxonomy_files(flat_glob: str, zip_glob: str):
-    """Yield readable file objects matching flat_glob under data/taxonomy/,
-    or — if none are found there — matching zip_glob inside TAXONOMY_ZIP."""
+    """Yield readable file objects matching flat_glob under data/taxonomy/.
+    If none are found there, yield ones matching zip_glob inside TAXONOMY_ZIP instead."""
     paths = sorted(glob.glob(flat_glob))
     if paths:
         for path in paths:
@@ -99,7 +98,6 @@ REPO_CONFIG_TTL = f"""
 """
 
 
-# ── RDF Namespaces ─────────────────────────────────────────────────────────────
 GICS = Namespace("http://gics.msci.com/ontology/")
 IFRS = Namespace("http://xbrl.ifrs.org/taxonomy/2025/")
 KG   = Namespace("http://ifrs-gics.ontotext.com/ontology/")
@@ -107,22 +105,17 @@ KG   = Namespace("http://ifrs-gics.ontotext.com/ontology/")
 
 def load_calculation_rules() -> list[tuple[str, str, float]]:
     """
-    (parent, child, weight) summation triples — weight +1.0 for addition,
+    (parent, child, weight) summation triples: weight +1.0 for addition,
     -1.0 for subtraction, e.g. GrossProfit = Revenue - CostOfSales.
 
-    Parsed directly from the IFRS Accounting Taxonomy's own calculation
-    linkbase XML (data/taxonomy/linkbases/*/cal_*.xml — Statement of
-    Financial Position, Profit or Loss, Comprehensive Income, Changes in
-    Equity, Cash Flows) rather than hand-transcribed, so it can't silently
-    drift out of sync with the taxonomy: a hand-transcribed copy of this
-    same data was previously missing ~90 of the 415 real summation arcs
-    the linkbase XML actually defines.
+    Parsed straight from the IFRS Accounting Taxonomy's calculation linkbase
+    XML rather than hand-transcribed, so it can't drift out of sync. A
+    hand-transcribed copy previously missed ~90 of the 415 real arcs.
 
-    Each linkbase file defines <link:loc> elements mapping a short local
-    label (e.g. "loc_1") to a tag name via its xlink:href fragment, and
-    <link:calculationArc> elements connecting two such labels with a
-    weight — this resolves the arcs' labels back to tag names via each
-    file's own loc map (labels aren't unique across files).
+    Each linkbase file maps a local label (e.g. "loc_1") to a tag name via
+    <link:loc>'s xlink:href, and connects two labels with a weight via
+    <link:calculationArc>. Labels aren't unique across files, so each
+    file's arcs are resolved against its own loc map.
     """
     ns = {
         "link":  "http://www.xbrl.org/2003/linkbase",
@@ -151,8 +144,6 @@ def load_calculation_rules() -> list[tuple[str, str, float]]:
 
     return sorted(rules)
 
-
-# ── Helpers ────────────────────────────────────────────────────────────────────
 
 def camel_to_sentence(name: str) -> str:
     s = re.sub(r'([a-z])([A-Z])', r'\1 \2', name)
@@ -183,8 +174,6 @@ def load_ifrs_labels() -> dict:
     return label_map
 
 
-# ── GraphDB RDF loader ─────────────────────────────────────────────────────────
-
 class GraphDBLoader:
 
     def __init__(self):
@@ -204,7 +193,7 @@ class GraphDBLoader:
             )
         existing = {r["id"] for r in resp.json()}
         if REPOSITORY in existing:
-            print(f"  ✓ Repository '{REPOSITORY}' already exists")
+            print(f"  Repository '{REPOSITORY}' already exists")
             return
 
         create_resp = requests.post(
@@ -216,14 +205,14 @@ class GraphDBLoader:
                 f"Repository creation failed: {create_resp.status_code} "
                 f"{create_resp.text[:300]}"
             )
-        print(f"  ✓ Repository '{REPOSITORY}' created")
+        print(f"  Repository '{REPOSITORY}' created")
 
     def _test_connection(self):
         try:
             self.sparql.setQuery("SELECT * WHERE { ?s ?p ?o } LIMIT 1")
             self.sparql.query()
-            print(f"  ✓ Connected to GraphDB at {GRAPHDB_URL}")
-            print(f"  ✓ Repository: {REPOSITORY}")
+            print(f"  Connected to GraphDB at {GRAPHDB_URL}")
+            print(f"  Repository: {REPOSITORY}")
         except Exception as e:
             raise ConnectionError(f"Cannot connect to GraphDB: {e}\n"
                                   f"Make sure GraphDB is running at {GRAPHDB_URL}")
@@ -233,7 +222,7 @@ class GraphDBLoader:
         response = requests.delete(UPDATE_URL)
         if response.status_code not in (200, 204):
             raise Exception(f"Clear failed: {response.status_code}")
-        print("  ✓ Repository cleared")
+        print("  Repository cleared")
 
     def _insert_triples(self, g: Graph):
         """Insert an rdflib Graph into GraphDB via REST API."""
@@ -262,8 +251,8 @@ class GraphDBLoader:
         props = {
             "PARENT_OF":       ("GICS hierarchy parent-child relationship", KG.Sector,      KG.IndustryGroup),
             "HAS_RELEVANT_TAG":("Maps a GICS SubIndustry to relevant XBRL tags", KG.SubIndustry, KG.XBRLTag),
-            "HAS_CHILD_TAG":   ("XBRL summation rule (additive) — parent tag contains child tag", KG.XBRLTag, KG.XBRLTag),
-            "HAS_CHILD_TAG_NEGATIVE": ("XBRL summation rule (subtractive) — parent tag subtracts child tag", KG.XBRLTag, KG.XBRLTag),
+            "HAS_CHILD_TAG":   ("XBRL summation rule (additive): parent tag contains child tag", KG.XBRLTag, KG.XBRLTag),
+            "HAS_CHILD_TAG_NEGATIVE": ("XBRL summation rule (subtractive): parent tag subtracts child tag", KG.XBRLTag, KG.XBRLTag),
         }
         for prop, (comment, domain, range_) in props.items():
             g.add((KG[prop], RDF.type,         RDF["Property"]))
@@ -273,7 +262,7 @@ class GraphDBLoader:
             g.add((KG[prop], RDFS.range,       range_))
 
         self._insert_triples(g)
-        print("  ✓ Ontology loaded")
+        print("  Ontology loaded")
 
     def load_gics_hierarchy(self):
         """Load GICS nodes and PARENT_OF relationships."""
@@ -311,9 +300,9 @@ class GraphDBLoader:
             counts[n] += 1
 
         self._insert_triples(g)
-        print(f"  ✓ GICS: {counts[2]} sectors, {counts[4]} groups, "
+        print(f"  GICS: {counts[2]} sectors, {counts[4]} groups, "
               f"{counts[6]} industries, {counts[8]} sub-industries")
-        print(f"  ✓ PARENT_OF edges: {counts[4]+counts[6]+counts[8]}")
+        print(f"  PARENT_OF edges: {counts[4]+counts[6]+counts[8]}")
 
     def load_xbrl_tags(self, label_map: dict):
         """Load all XBRL tag nodes."""
@@ -338,7 +327,7 @@ class GraphDBLoader:
                 g.add((uri, IFRS.periodType, Literal(meta["period_type"])))
 
         self._insert_triples(g)
-        print(f"  ✓ XBRLTag nodes: {len(ifrs_definition)}")
+        print(f"  XBRLTag nodes: {len(ifrs_definition)}")
 
     def load_universal_tags(self):
         """
@@ -363,7 +352,7 @@ class GraphDBLoader:
                     count += 1
 
         self._insert_triples(g)
-        print(f"  ✓ Universal HAS_RELEVANT_TAG: {count} triples "
+        print(f"  Universal HAS_RELEVANT_TAG: {count} triples "
               f"({len(UNIVERSAL_TAGS)} tags × {len(si_codes)} sub-industries)")
 
     def load_subindustry_tags(self, mapping: dict):
@@ -382,14 +371,14 @@ class GraphDBLoader:
                     total += 1
 
         self._insert_triples(g)
-        print(f"  ✓ SubIndustry HAS_RELEVANT_TAG: {total} triples")
+        print(f"  SubIndustry HAS_RELEVANT_TAG: {total} triples")
 
     def load_has_child_tag(self):
         """
         Load XBRLTag -[HAS_CHILD_TAG]-> XBRLTag summation rules (weight +1.0)
         and XBRLTag -[HAS_CHILD_TAG_NEGATIVE]-> XBRLTag (weight -1.0, e.g.
         GrossProfit = Revenue - CostOfSales). Two predicates rather than a
-        single weighted edge — keeps triples flat, no reification needed.
+        single weighted edge: keeps triples flat, no reification needed.
         """
         g = Graph()
         g.bind("ifrs", IFRS)
@@ -407,7 +396,7 @@ class GraphDBLoader:
                 neg_count += 1
 
         self._insert_triples(g)
-        print(f"  ✓ HAS_CHILD_TAG summation rules: {pos_count} additive, {neg_count} subtractive")
+        print(f"  HAS_CHILD_TAG summation rules: {pos_count} additive, {neg_count} subtractive")
 
     def verify(self):
         """Run verification SPARQL queries."""
@@ -429,7 +418,7 @@ class GraphDBLoader:
         """
 
         print("\n" + "=" * 55)
-        print("VERIFICATION — GraphDB triple counts")
+        print("VERIFICATION: GraphDB triple counts")
         print("=" * 55)
 
         for label, query in queries.items():
@@ -439,7 +428,7 @@ class GraphDBLoader:
             print(f"  {label:25s}: {count}")
 
         # Sample Regional Banks tags
-        print("\n  Sample — Regional Banks (40101015) HAS_RELEVANT_TAG:")
+        print("\n  Sample: Regional Banks (40101015) HAS_RELEVANT_TAG:")
         self.sparql.setQuery(prefixes + """
             SELECT ?tagName ?label WHERE {
                 gics:40101015 kg:HAS_RELEVANT_TAG ?tag .
@@ -452,7 +441,7 @@ class GraphDBLoader:
         for r in results["results"]["bindings"]:
             print(f"    {r['tagName']['value']:50s} → {r['label']['value']}")
 
-        # Summation rules — sample a handful of parents (323 rules total, too many to print in full)
+        # Summation rules: sample a handful of parents (323 rules total, too many to print in full)
         print("\n  Summation rules (HAS_CHILD_TAG / HAS_CHILD_TAG_NEGATIVE), sample:")
         self.sparql.setQuery(prefixes + """
             SELECT ?parent ?child ?sign WHERE {
@@ -477,8 +466,6 @@ class GraphDBLoader:
             print(f"    ... and {len(parents) - 8} more parent totals")
 
 
-# ── Main ───────────────────────────────────────────────────────────────────────
-
 def main():
     print("=" * 60)
     print("GraphDB Knowledge Graph Builder")
@@ -487,12 +474,10 @@ def main():
     print(f"  Input:      {INPUT_JSON}")
     print("=" * 60)
 
-    # ── Load IFRS labels ───────────────────────────────────────────────
     print("\n[1] Loading IFRS labels...")
     label_map = load_ifrs_labels()
     print(f"  {len(label_map)} labels loaded")
 
-    # ── Load SubIndustry → XBRL tag mapping (pre-computed on Katana) ────
     print(f"\n[2] Loading SubIndustry → XBRL tag mapping from {INPUT_JSON}...")
     with open(INPUT_JSON) as f:
         si_mapping = json.load(f)
@@ -502,7 +487,6 @@ def main():
     print(f"  {total_si} sub-industries, {total_tags} edges "
           f"(avg {total_tags/total_si:.1f}/SI)")
 
-    # ── Load into GraphDB ──────────────────────────────────────────────
     print("\n[3] Loading into GraphDB...")
     loader = GraphDBLoader()
 
@@ -527,11 +511,10 @@ def main():
     print("  Loading summation rules (HAS_CHILD_TAG)...")
     loader.load_has_child_tag()
 
-    # ── Verify ────────────────────────────────────────────────────────
     loader.verify()
 
     print("\n" + "=" * 60)
-    print("✅ Knowledge graph loaded into GraphDB!")
+    print("Knowledge graph loaded into GraphDB!")
     print("=" * 60)
     print(f"\nOpen GraphDB at: {GRAPHDB_URL}")
     print(f"Repository:      {REPOSITORY}")

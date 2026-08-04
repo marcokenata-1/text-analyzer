@@ -1,10 +1,10 @@
 """
-FinBERT + Qwen3-14B IFRS Tag Mapper v9 — Katana HPC
+FinBERT + Qwen3-14B IFRS Tag Mapper v9 (Katana HPC)
 
 SELECT mode (not v5's REMOVE mode): ask Qwen3 to pick only the tags that
 are specifically relevant, default is EXCLUDE. v5 switched to "remove only
-clearly wrong tags, default KEEP" and — as expected of an LLM asked to
-justify removal rather than inclusion — ended up keeping ~1800 of ~2000
+clearly wrong tags, default KEEP". As expected of an LLM asked to
+justify removal rather than inclusion, it ended up keeping ~1800 of ~2000
 candidate tags for nearly every SubIndustry, defeating the entire point of
 Contextual Pruning (see subindustry_ifrs_mapping_v5.json). SELECT mode is
 what actually produced the precise, industry-specific mappings this
@@ -16,14 +16,14 @@ under 40 minutes but came back 82% empty (133/163 SubIndustries with zero
 tags). Root cause: Qwen3 is a reasoning model that emits a <think>...</think>
 block before its answer, the old script fed it a raw prompt string (no chat
 template) with MAX_NEW_TOKENS=150, and most batches ran out of budget mid-
-thought — parse_numbers correctly found no complete "[...]" array after
+thought, so parse_numbers correctly found no complete "[...]" array after
 stripping the (truncated, unclosed) think block, so it silently returned [].
 Fix: use the proper chat template with enable_thinking=False, which skips
 the reasoning trace entirely instead of just hoping it finishes in time.
 
 Also widens FinBERT top-K from 100 -> 150: v3_katana/v4_qwen's 100-candidate
 shortlist is why only 21.3% of the full IFRS taxonomy is reachable by any
-SubIndustry at all (measured directly against the live GraphDB — see
+SubIndustry at all (measured directly against the live GraphDB, see
 project notes). 150 gives Qwen3 meaningfully more to select from without
 approaching v5's "send it everything" over-inclusion.
 
@@ -51,48 +51,48 @@ from universal_ifrs_tags import UNIVERSAL_TAGS
 
 # `ollama` and `build_graphdb` (rdflib/SPARQLWrapper) are NOT installed in
 # the Katana HPC environment (see module docstring's pip list) and aren't
-# needed there — only generate_disclosure_tags()/generate_sector_specific_
+# needed there; only generate_disclosure_tags()/generate_sector_specific_
 # tags() below use them, and those are meant to be run locally/once to
 # produce the small cached JSON files the Katana mapper actually loads.
 # Imported lazily inside those two functions instead of at module level so
 # a normal Katana run of this script never touches either dependency.
 
 
-# ── Config ─────────────────────────────────────────────────────────────────────
+# Config
 BIENCODER_MODEL = "ProsusAI/finbert"
 LLM_MODEL       = "/srv/scratch/z5603945/hf_cache/Qwen3-14B"
 
 OUTPUT_FILE     = "subindustry_ifrs_mapping_v9.json"
 CHECKPOINT_FILE = "subindustry_ifrs_mapping_v9_checkpoint.json"
 
-# Stage 1 — FinBERT candidates. 150 (up from the 100 that produced
-# v3_katana/v4_qwen) — meaningfully broader without approaching v5's
+# Stage 1: FinBERT candidates. 150 (up from the 100 that produced
+# v3_katana/v4_qwen), meaningfully broader without approaching v5's
 # effectively-unfiltered ~1800.
 BIENCODER_TOPK  = 150
 
-# Stage 2 — Qwen3 batch size. enable_thinking=False means no reasoning
+# Stage 2: Qwen3 batch size. enable_thinking=False means no reasoning
 # trace to budget for, so this covers a batch of up to 50 selected numbers
 # comfortably.
 QWEN_BATCH_SIZE = 50
 MAX_NEW_TOKENS  = 300
 
 # Disclosure-only tags (notes/breakdowns, never a standalone reported line
-# item) are NOT a hand-maintained list here — see generate_disclosure_tags()
+# item) are NOT a hand-maintained list here; see generate_disclosure_tags()
 # below, which produces this file once (LLM-classified, then validated
 # against the calculation linkbase) and caches it; the mapper just loads it.
 DISCLOSURE_TAGS_FILE = "data/taxonomy/disclosure_tags.json"
 
 # Sector-specific tags (Oil & Gas/Mining tags leaking into unrelated
 # SubIndustries, banking/insurance tags leaking in via generic financial-
-# vocabulary overlap like "loans", "fair value", "credit") — an LLM-generate
+# vocabulary overlap like "loans", "fair value", "credit"). An LLM-generate
 # + embedding-validate attempt at making this dynamic (generate_sector_
 # specific_tags() below) was tried and rejected: sampling its output found
 # real false positives (e.g. CurrentPortionOfLongtermBorrowings,
-# OtherFinanceIncomeCost, ProceedsFromIssuingOtherEquityInstruments —
+# OtherFinanceIncomeCost, ProceedsFromIssuingOtherEquityInstruments;
 # generic tags any company could report, not bank-exclusive), and checking
 # the actual similarity margins confirmed embedding closeness to a sector's
 # GICS description measures "does this tag's wording resemble that sector's
-# vocabulary," not "would only that sector report this" — false and true
+# vocabulary," not "would only that sector report this". False and true
 # positives had overlapping margins (e.g. a false positive at 0.076 vs a
 # true positive at 0.079), so no threshold fixes it. Kept hand-maintained
 # until a better validation signal exists (e.g. cross-referencing empirical
@@ -130,7 +130,7 @@ def load_disclosure_tags() -> set:
         return set(json.load(f))
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+# Helpers
 
 def log(msg: str):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -187,19 +187,19 @@ def apply_hard_blocklist(mapping: dict) -> dict:
     return cleaned
 
 
-# ── Dynamic tag classification (generate once, cache to disk) ──────────────────
+# Dynamic tag classification (generate once, cache to disk)
 #
-# generate_disclosure_tags() is NOT part of a normal Katana mapping run —
+# generate_disclosure_tags() is NOT part of a normal Katana mapping run;
 # it's a separate, one-time (or "re-run when the taxonomy changes")
 # preprocessing step meant to be run locally, producing the small
 # DISCLOSURE_TAGS_FILE the actual mapper loads via load_disclosure_tags().
 # Requires `ollama` and this repo's data/taxonomy/ (for build_graphdb's
-# calculation linkbase parser) — neither is expected to be present on
+# calculation linkbase parser); neither is expected to be present on
 # Katana, hence the lazy imports.
 #
 # generate_sector_specific_tags() is kept below for its embedding-validation
 # approach and docstring explaining why it's NOT currently wired in (see the
-# HARD_BLOCKLIST/FINANCIAL_INSTITUTION_KEYWORDS comment above) — a starting
+# HARD_BLOCKLIST/FINANCIAL_INSTITUTION_KEYWORDS comment above): a starting
 # point if a better validation signal shows up later, not dead code to
 # resurrect blindly.
 
@@ -224,18 +224,18 @@ def generate_disclosure_tags(tags: list) -> set:
     """
     LLM-classifies each tag as a PRIMARY financial-statement line item or a
     DISCLOSURE-only figure (notes: breakdowns, roll-forwards, related-party
-    detail, fair-value hierarchy levels, etc — never a top-level reported
+    detail, fair-value hierarchy levels, etc, never a top-level reported
     total), batched.
 
     Validated against the calculation linkbase (build_graphdb.load_
     calculation_rules): any tag that participates in an official IFRS
     summation rule is definitionally PRIMARY regardless of what the LLM
-    says — this overrides the LLM's classification instead of trusting its
+    says. This overrides the LLM's classification instead of trusting its
     judgment blindly, the same principle as build_chromadb.py's
     validate_synonym_map. Concretely caught a real case during design: the
     old hand-maintained list excluded every "ShareOfOtherComprehensiveIncome*"
     tag as disclosure-only, but those tags are genuine calculation-linkbase
-    children of OtherComprehensiveIncome — a real bug this validation fixes.
+    children of OtherComprehensiveIncome, a real bug this validation fixes.
     """
     from build_graphdb import load_calculation_rules
     rules = load_calculation_rules()
@@ -282,20 +282,20 @@ Reply with ONLY a JSON object mapping each number (as a string) to
 
 def generate_sector_specific_tags(tags: list, model) -> dict:
     """
-    NOT CURRENTLY USED — see the HARD_BLOCKLIST/FINANCIAL_INSTITUTION_KEYWORDS
+    NOT CURRENTLY USED. See the HARD_BLOCKLIST/FINANCIAL_INSTITUTION_KEYWORDS
     comment above for why. Kept as a documented, tested-and-rejected attempt
     rather than deleted, since the approach (LLM classify + embedding
     validate) is sound in principle, just not with this validation signal.
 
     LLM-classifies which GICS Sector (if any) each tag is exclusive to,
     batched. "Validated" by embedding: the tag's own label must sit closer
-    to its claimed sector's GICS description than to every other sector's —
+    to its claimed sector's GICS description than to every other sector's;
     the same principle as build_chromadb.py's validate_synonym_map, but it
     doesn't hold up here: sampling the output found real false positives
     (generic tags like CurrentPortionOfLongtermBorrowings and
     OtherFinanceIncomeCost classified as Financials-exclusive), and their
     similarity margins overlap with genuine true positives' margins (e.g. a
-    false positive at 0.076 vs a true positive at 0.079) — no threshold
+    false positive at 0.076 vs a true positive at 0.079); no threshold
     separates them. This embedding check measures "does this tag's wording
     resemble the claimed sector's vocabulary," which isn't the same
     question as "would only that sector realistically report this," and
@@ -356,7 +356,7 @@ Reply with ONLY a JSON object mapping each number (as a string) to a
     return validated
 
 
-# ── Qwen3 resolver ─────────────────────────────────────────────────────────────
+# Qwen3 resolver
 
 class Qwen3Resolver:
 
@@ -442,7 +442,7 @@ Do not explain. Just the array."""
         return list(set(accepted))
 
 
-# ── Main mapper ────────────────────────────────────────────────────────────────
+# Main mapper
 
 class FinBERTQwenMapper:
 
@@ -500,7 +500,7 @@ class FinBERTQwenMapper:
         total_si      = len(subindustries)
         mapping       = checkpoint or {}
 
-        log(f"Mapping {total_si} SubIndustries — FinBERT + Qwen3")
+        log(f"Mapping {total_si} SubIndustries: FinBERT + Qwen3")
         log(f"Stage 1: FinBERT top-{BIENCODER_TOPK} candidates")
         log(f"Stage 2: Qwen3 batches of {QWEN_BATCH_SIZE}, enable_thinking=False\n")
 
@@ -526,11 +526,11 @@ class FinBERTQwenMapper:
         return mapping
 
 
-# ── Main ───────────────────────────────────────────────────────────────────────
+# Main
 
 def main():
     log("=" * 60)
-    log("FinBERT + Qwen3 IFRS Tag Mapper v9 — Katana HPC")
+    log("FinBERT + Qwen3 IFRS Tag Mapper v9 (Katana HPC)")
     log("=" * 60)
     log(f"Python:  {sys.version.split()[0]}")
     log(f"PyTorch: {torch.__version__}")
@@ -539,7 +539,7 @@ def main():
     if Path(CHECKPOINT_FILE).exists():
         with open(CHECKPOINT_FILE) as f:
             checkpoint = json.load(f)
-        log(f"Resuming from checkpoint — {len(checkpoint)} done")
+        log(f"Resuming from checkpoint, {len(checkpoint)} done")
 
     mapper  = FinBERTQwenMapper()
     mapping = mapper.map_all(checkpoint=checkpoint)
@@ -552,7 +552,7 @@ def main():
 
     total_tags = sum(len(v) for v in mapping.values())
     zeros      = [k for k, v in mapping.items() if len(v) == 0]
-    log(f"\nSUMMARY")
+    log("\nSUMMARY")
     log(f"  Sub-industries:  {len(mapping)}")
     log(f"  Total edges:     {total_tags}")
     log(f"  Average/SI:      {total_tags/len(mapping):.1f}")

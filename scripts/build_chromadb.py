@@ -1,26 +1,16 @@
 """
-Vector Database Builder — Knowledge Layer semantic search
+Vector Database Builder: Knowledge Layer semantic search
 
-Per the research report (Sec 2.5.4, 3.3, 4.2 Phase 1): the Vector Database
-indexes high-dimensional representations of GICS definitions and XBRL tags,
-giving the Reasoning Layer's Semantic Mapper a nearest-neighbor search over
-the same two node types already stored in the GraphDB Knowledge Graph.
-
-Two collections (mirrors the Knowledge Graph node types):
-    gics_definitions — one entry per GICS Sector/IndustryGroup/Industry/SubIndustry
-    xbrl_tags        — one entry per IFRS XBRL tag
+Indexes GICS definitions and XBRL tags into ChromaDB so the Reasoning
+Layer's Semantic Mapper can nearest-neighbor search over the same two node
+types already stored in the GraphDB Knowledge Graph. Two collections,
+mirroring the Knowledge Graph:
+    gics_definitions: one entry per GICS Sector/IndustryGroup/Industry/SubIndustry
+    xbrl_tags:        one entry per IFRS XBRL tag
 
 Embeddings use BAAI/bge-base-en-v1.5 (MODEL_NAME below), a general-purpose
-sentence-similarity model. The report (Sec 2.4.3) suggests FinBERT for its
-financial-domain vocabulary, but empirically FinBERT's embeddings — from a
-sentiment-classification head, not a similarity-trained one — performed
-markedly worse here than a general-purpose sentence-similarity model on
-both GICS paragraph matching and short XBRL label matching. A finance-
-tuned alternative (FinLang/finance-embeddings-investopedia) was also
-evaluated and rejected — see api.py's module docstring for why. Domain
-tuning doesn't help if the embedding space itself isn't optimized for
-"are these semantically related," and can actively hurt if it narrows the
-space to one financial-text style at the expense of general matching.
+sentence-similarity model. See api.py's module docstring for why the
+finance-tuned alternatives we tried (FinBERT, FinLang) did worse here.
 
 Setup:
     pip install chromadb sentence-transformers
@@ -38,7 +28,6 @@ from ifrs_tags   import definition as ifrs_definition
 from build_graphdb import load_ifrs_labels, camel_to_sentence
 
 
-# ── Config ─────────────────────────────────────────────────────────────────────
 CHROMA_HOST      = "localhost"
 CHROMA_PORT      = 8001
 MODEL_NAME       = "BAAI/bge-base-en-v1.5"
@@ -50,18 +39,13 @@ GICS_LEVELS = {2: "Sector", 4: "IndustryGroup", 6: "Industry", 8: "SubIndustry"}
 
 def generate_synonym_map(short_labels: list[tuple[str, str]]) -> dict[str, list[str]]:
     """
-    Ask Ollama for common alternate names of short (<=3 word) tag labels —
+    Ask Ollama for common alternate names of short (<=3 word) tag labels,
     e.g. "Revenue" -> "net sales", "turnover". Only short labels are worth
-    asking about: a bag-of-words-ish embedding has nothing to disambiguate
-    "Revenue" from "Cost Of Sales" on a short label, but longer compound
-    labels ("Cash Flows From Used In Financing Activities") rarely collide.
-    Generated at build time so this tracks whatever tags/labels the current
-    IFRS taxonomy defines, instead of a hand-maintained list going stale.
-
-    Whether a synonym actually helps (vs. colliding with a sibling tag) is
-    verified afterwards in validate_synonym_map — this function just
-    proposes candidates, so the prompt doesn't need to get that judgment
-    right itself.
+    asking about: longer compound labels rarely collide, but a short one
+    like "Revenue" has nothing to disambiguate it from "Cost Of Sales".
+    Generated at build time so this tracks the current taxonomy instead of
+    a hand-maintained list going stale. Just proposes candidates;
+    validate_synonym_map checks whether each one actually helps.
     """
     items = "\n".join(f"{n}. {label}" for n, (_, label) in enumerate(short_labels, 1))
     prompt = f"""You are an IFRS financial reporting expert.
@@ -85,7 +69,7 @@ with no good synonym. No other text."""
         raw = re.sub(r"^```(?:json)?|```$", "", resp["message"]["content"].strip(), flags=re.M).strip()
         # raw_decode (not loads): larger batches sometimes get trailing prose
         # appended after a perfectly valid JSON object despite instructions
-        # not to — parse just the first JSON value and ignore the rest.
+        # not to, so just parse the first JSON value and ignore the rest.
         parsed, _ = json.JSONDecoder().raw_decode(raw)
         synonyms: dict[str, list[str]] = {}
         for n, syns in parsed.items():
@@ -102,10 +86,9 @@ def validate_synonym_map(
     short_labels: list[tuple[str, str]], synonym_map: dict[str, list[str]], model
 ) -> dict[str, list[str]]:
     """
-    Drop any synonym that, if a report literally used that word, would embed
-    closer to a *different* short tag than to its own — i.e. verify each
-    synonym actually disambiguates rather than trusting the model's own
-    judgment call about what's ambiguous (unreliable — see build history).
+    Drop any synonym that would embed closer to a *different* short tag
+    than to its own. This verifies it actually disambiguates rather than
+    trusting the model's own judgment about what's ambiguous.
     """
     tags   = [t for t, _ in short_labels]
     docs   = [
@@ -127,16 +110,14 @@ def validate_synonym_map(
 
 def build_gics_documents():
     """
-    Only the 163 finest-grained SubIndustry entries in d_20230318 carry a real
-    description — all 110 Sector/IndustryGroup/Industry entries (the ones the
-    classification walk actually starts at) are just a bare 1-3 word name
-    ("Materials", "Industrials"). A bare name has nothing to disambiguate on:
-    e.g. "Al Yamamah Steel Industries Company" pulled toward "Industrials"
-    over "Materials" purely because "Industries" and "Industrials" share a
-    root — the same lexical-overlap trap fixed for XBRL tags earlier.
-    Fix: roll up each blank entry's own descendant SubIndustry names as its
-    description — derived straight from data already in the dataset, so it
-    stays correct automatically if the taxonomy changes, no LLM/hardcoding.
+    Only the 163 finest-grained SubIndustry entries in d_20230318 carry a
+    real description. The 110 Sector/IndustryGroup/Industry entries (where
+    the classification walk actually starts) are just a bare 1-3 word name
+    like "Materials" or "Industrials", which has nothing to disambiguate on
+    (e.g. "...Industries Company" pulling toward "Industrials" purely on
+    shared root). Fix: roll up each blank entry's own descendant
+    SubIndustry names as its description, so it stays correct automatically
+    if the taxonomy changes.
     """
     subindustry_names_by_code: dict[str, list[str]] = {}
     for code, data in gics_definition.items():
@@ -229,13 +210,13 @@ def main():
     gics_collection = recreate_collection(client, "gics_definitions")
     g_ids, g_docs, g_meta = build_gics_documents()
     embed_and_add(gics_collection, model, g_ids, g_docs, g_meta)
-    print(f"  ✓ {len(g_ids)} GICS definitions embedded")
+    print(f"  {len(g_ids)} GICS definitions embedded")
 
     print("\n[4] Building xbrl_tags collection...")
     xbrl_collection = recreate_collection(client, "xbrl_tags")
     x_ids, x_docs, x_meta = build_xbrl_documents(label_map, synonym_map)
     embed_and_add(xbrl_collection, model, x_ids, x_docs, x_meta)
-    print(f"  ✓ {len(x_ids)} XBRL tags embedded")
+    print(f"  {len(x_ids)} XBRL tags embedded")
 
     print("\n" + "=" * 60)
     print("VERIFICATION")
@@ -252,7 +233,7 @@ def main():
     ):
         print(f"    {tag_id:45s} {doc[:45]:45s} dist={dist:.4f}")
 
-    print("\n✅ ChromaDB built.")
+    print("\nChromaDB built.")
     print(f"   client = chromadb.HttpClient(host='{CHROMA_HOST}', port={CHROMA_PORT})")
 
 

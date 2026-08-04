@@ -1,35 +1,25 @@
 """
-parse_extraction.py — converts Layer 1 extractions.json to a flat list of LineItems.
+Converts Layer 1 extractions.json to a flat list of LineItems.
 
-The extraction format is a document with a 'tables' list.  Each table has
-'headers' and 'rows', both of which contain many empty-string cells due to
-merged-cell rendering from PDF vector extraction.
+Each document has a 'tables' list; tables have 'headers' and 'rows', both
+full of empty-string cells from merged-cell PDF rendering. We keep only
+tables whose headers name a description column and whose rows contain a
+financial keyword, then per row skip empty/year/percentage/single-char
+cells to find the description and take the first numeric value after it
+as the most-recent-year amount. Descriptions are de-duplicated across
+tables since statements often repeat summary lines.
 
-Strategy:
-  1. Financial tables — keep only tables whose headers name a description
-     column (Statement / Description / Particulars) AND whose rows contain
-     at least one financial keyword.
-  2. Per row: skip empty / year / percentage / single-char cells to find
-     the description, then take the first parseable numeric value after it
-     as the most-recent-year amount (first numeric column = most recent year).
-  3. De-duplicate descriptions across tables to avoid counting the same
-     line item twice (some statements repeat summary lines in later tables).
-
-Company name detection (extract_company_name) uses a four-tier fallback:
-  1. doc["company_name"] — set by Layer 1 if available (preferred, zero cost)
-  2. Exchange lookup — company ID from filename + source → DuckDuckGo query
-     e.g. "761_0_2025-12-31_En.pdf" + "saudi_exchange" → "Al Yamamah Steel"
-  3. Annual report boilerplate phrases in the first 3 tables, e.g.
-     "performance of Acme Corp during the year" → "Acme Corp"
-  4. Most-frequent Title Case phrase across the first 5 tables (last resort)
+extract_company_name() tries, in order: Layer 1's own doc["company_name"],
+an exchange ID lookup (filename + source -> DuckDuckGo), boilerplate
+phrases like "performance of Acme Corp during the year" in the first 3
+tables, then the most-frequent Title Case phrase across the first 5
+tables as a last resort.
 """
 
 import re
 import requests
 from typing import Optional
 
-
-# ── Patterns ──────────────────────────────────────────────────────────────────
 
 FINANCIAL_TERMS = re.compile(
     r'\b(assets?|liabilities?|equity|revenue|sales?|profit|loss|income|expense|'
@@ -48,8 +38,6 @@ YEAR_RE     = re.compile(r'^\d{4}$')
 PCT_RE      = re.compile(r'^-?[\d,\.]+\s*%$')
 NUMBER_RE   = re.compile(r'^-?[\d,]+\.?\d*$')
 FRAGMENT_RE = re.compile(r'^(and|or|the|of|in|for|to|a|at|by|as|on)\s*$', re.I)
-
-# ── Exchange company ID lookup ────────────────────────────────────────────────
 
 # Filename convention: {company_id}_{revision}_{fiscal_year_end}_{time}_{lang}.pdf
 _FILENAME_ID = re.compile(r'^(\d+)_')
@@ -99,8 +87,6 @@ def _lookup_company_by_id(company_id: str, source: str) -> Optional[str]:
     return None
 
 
-# ── Company name extraction ────────────────────────────────────────────────────
-
 # Boilerplate phrases in annual report TOC/intro tables that precede the company name
 _INTRO_PHRASE = re.compile(
     r'(?:performance of|report of|directors? of|annual report of|statements? of|'
@@ -121,8 +107,6 @@ _STOP_WORDS = frozenset({
 
 _TITLE_RUN = re.compile(r'[A-Z][A-Za-z&\-]+')
 
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def clean_amount(raw: str) -> Optional[str]:
     """'1,234,567' → '1234567';  '(1,234)' → '-1234';  else None."""
@@ -186,28 +170,18 @@ def _all_table_text(tables: list, limit: int) -> list[str]:
 
 def extract_company_name(doc: dict) -> Optional[str]:
     """
-    Four-tier company name detection, generic across any annual report.
-
-    Tier 1 — Layer 1 metadata: doc["company_name"] if set, zero cost.
-    Tier 2 — Exchange ID lookup: parse company_id from filename + source,
-              query DuckDuckGo with an exchange-specific search string.
-    Tier 3 — TOC/intro boilerplate: scan the first 3 tables for annual report
-              phrases like "performance of Acme Corp during the year".
-    Tier 4 — Title Case frequency: most-repeated 2-3 word capitalised phrase
-              across the first 5 tables (last resort). Excludes same-word
-              repeats from prose ("CGUs CGUs") and repeated whole-cell
-              structural labels ("Outside KSA" in a disclosure table) — both
-              are common false positives, not a name mentioned in prose.
-              Even after these fixes this tier is unreliable on documents
-              dominated by governance/audit boilerplate or heavy mentions of
-              a counterparty (a business partner can out-frequency the
-              reporting entity's own name) — treat its result as a guess.
+    Four-tier company name detection, generic across any annual report;
+    see the module docstring for the tier order. Tier 4 (frequency-based)
+    excludes same-word repeats from prose ("CGUs CGUs") and repeated
+    whole-cell structural labels ("Outside KSA" in a disclosure table), but
+    is still unreliable on documents dominated by governance boilerplate or
+    heavy mentions of a counterparty, so treat its result as a guess.
     """
     # Tier 1
     if doc.get('company_name'):
         return doc['company_name'].strip()
 
-    # Tier 2 — exchange company ID lookup
+    # Tier 2: exchange company ID lookup
     company_id, source = _company_id_from_doc(doc)
     if company_id and source:
         name = _lookup_company_by_id(company_id, source)
@@ -216,7 +190,7 @@ def extract_company_name(doc: dict) -> Optional[str]:
 
     tables = doc.get('tables', [])
 
-    # Tier 3 — boilerplate phrase scan
+    # Tier 3: boilerplate phrase scan
     for text in _all_table_text(tables, limit=3):
         m = _INTRO_PHRASE.search(text)
         if m:
@@ -224,7 +198,7 @@ def extract_company_name(doc: dict) -> Optional[str]:
             if len(name) > 3:
                 return name
 
-    # Tier 4 — most-frequent Title Case run (2+ consecutive qualifying words)
+    # Tier 4: most-frequent Title Case run (2+ consecutive qualifying words)
     from collections import Counter
     cell_texts = _all_table_text(tables, limit=5)
     # A phrase that IS a whole cell, where that exact cell recurs, is a
@@ -261,15 +235,13 @@ def _is_financial_table(headers: list[str], rows: list) -> bool:
     return bool(FINANCIAL_TERMS.search(all_text))
 
 
-# ── Main parser ───────────────────────────────────────────────────────────────
-
 def parse_extractions(data: dict) -> tuple[Optional[str], list[dict]]:
     """
     Parse extractions.json.
 
     Returns:
-        company_name — auto-detected via four-tier heuristic (see extract_company_name)
-        items        — flat list of {id, description, amount} dicts
+        company_name: auto-detected via four-tier heuristic (see extract_company_name)
+        items:        flat list of {id, description, amount} dicts
     """
     items: list[dict] = []
     seen: set[str] = set()
